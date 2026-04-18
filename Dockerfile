@@ -14,6 +14,9 @@ COPY --chmod=0644 main.py helicopters.yaml ./
 # File di config personalizzati si possono montare sovrascrivendo helicopters.yaml
 # oppure puntare HELICOPTERS_FILE a un volume.
 
+# Safety net: alcune build remote non rispettano --chmod sui COPY
+RUN chmod -R a+rX /app
+
 USER app
 
 ENV PYTHONUNBUFFERED=1 \

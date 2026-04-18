@@ -1,34 +1,26 @@
-# fly.toml — config Fly.io per heli-tracker
+# fly.toml app configuration file generated for elisoccorso-watch on 2026-04-18T21:48:28+02:00
 #
-# Dopo `fly launch --no-deploy` Fly potrebbe generare un nome app diverso.
-# Sostituisci il valore di `app` con il tuo e rideploy.
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "elisoccorso-watch"
-primary_region = "cdg"   # Parigi — latenza bassa verso OpenSky (Germania)
-
-[build]
-  dockerfile = "Dockerfile"
-
-# Il servizio è un worker persistente senza porte HTTP esposte, quindi
-# non definiamo [http_service]. Usiamo il process group "app" di default.
-[processes]
-  app = "python main.py"
-
-# VM dimensionamento free tier: shared-cpu-1x 256MB è abbondante per un poller.
-[[vm]]
-  size = "shared-cpu-1x"
-  memory = "256mb"
-  cpus = 1
-  cpu_kind = "shared"
-  # auto_stop_machines = false garantisce che resti sempre acceso.
-  # Con la Fly Free Allowance (3 macchine shared-cpu-1x 256MB 24/7) non costa nulla.
+app = 'elisoccorso-watch'
+primary_region = 'cdg'
 
 [experimental]
   auto_rollback = true
 
-# Restart automatico se crashia
-[deploy]
-  strategy = "immediate"
+[build]
+  dockerfile = 'Dockerfile'
 
-# Nessun volume di default: se in futuro vorrai persistenza (SQLite)
-# aggiungi un [[mounts]] source = "data" destination = "/data".
+[deploy]
+  strategy = 'immediate'
+
+[processes]
+  app = 'python main.py'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '256mb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 256
