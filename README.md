@@ -114,10 +114,73 @@ heli-tracker/
 └── README.md
 ```
 
-## Idee per estensioni
+## Possibili miglioramenti
 
-- **SQLite persistente** (volume Fly) per salvare eventi e statistiche.
-- **Dashboard web** con Flask/FastAPI + Leaflet per vedere i mezzi su mappa live.
-- **Filtro notifiche per fascia oraria** (es. solo tra le 08:00 e le 22:00).
-- **Webhook alternativi**: Discord, ntfy.sh, Signal, email.
-- **Geofencing**: notifica quando un mezzo entra/esce da una zona definita.
+Lista di estensioni valutate e rimandate, raggruppate per area. Ognuna è
+indipendente dalle altre; ordina per rapporto valore/sforzo in base al tuo
+contesto.
+
+### Qualità dei messaggi
+
+- **Traccia del volo come immagine**. Accumulare i waypoint osservati durante
+  il volo e allegare al messaggio di atterraggio un PNG generato via
+  `py-staticmaps` (o simile) con la rotta sovrapposta su basemap. Effetto visivo
+  forte, nessuna persistenza richiesta (solo RAM).
+- **Classificazione tipo missione**. Euristica su callsign, orario e pattern di
+  volo (hover prolungato = recupero, cruise rettilineo punto-punto =
+  trasferimento, volo notturno = HEMS notturno abilitato). Richiede aggregazione
+  di più poll.
+
+### Affidabilità dei dati
+
+- **Fallback adsb.lol / airplanes.live**. Integrare un secondo provider ADS-B
+  no-filter oltre a OpenSky (REST, no-auth, zero costi). Migliora la copertura
+  nelle zone montuose dove i ricevitori OpenSky scarseggiano (Carnia, Cadore,
+  Dolomiti). Implementazione: `OpenSkyClient` diventa `AdsbClient` che chiama
+  OpenSky e poi adsb.lol per gli ICAO non visti, merge con priorità al
+  `last_contact` più fresco.
+- **Backoff + alert su fallimenti OpenSky**. Oggi un'outage prolungata del
+  provider (o della rete Fly) passa silenziosa. Aggiungere exponential backoff
+  su errori consecutivi e una notifica Telegram dopo N cicli falliti.
+- **Health check esterno**. Worker muto da >2h = possibile deadlock silenzioso
+  non rilevabile dall'interno. Un cron su un servizio esterno
+  (UptimeRobot, healthchecks.io) che pinga un endpoint HTTP minimale esposto
+  dal container fornirebbe allerta indipendente.
+
+### Storico e statistiche
+
+- **Persistenza SQLite su volume Fly**. Salvare ogni volo
+  `(takeoff_ts, landing_ts, callsign, distanza, sito, durata)` per abilitare
+  statistiche (voli/giorno, tempo totale di volo per mezzo, destinazioni più
+  frequenti). Richiede `fly volumes create` e un `[[mounts]]` in `fly.toml`.
+  Abilita anche un futuro comando `/stats` e una dashboard.
+- **Dashboard web**. Flask/FastAPI + Leaflet per vedere mezzi su mappa live,
+  storico voli e filtri. Richiede esporre un `[http_service]` sul container
+  (oggi è worker puro).
+
+### Distribuzione e multi-utente
+
+- **Canale pubblico** in aggiunta a quello privato. Secondo target Telegram,
+  eventualmente filtrato sui mezzi "pubblici". Solo config, niente codice.
+- **Bot self-service con preferenze per utente**. Refactor a multi-tenant:
+  comando `/subscribe` con inline keyboard per selezionare quali elicotteri
+  seguire, persistenza in SQLite (`subscribers` + `subscriptions`), secondo
+  thread per `getUpdates` sui messaggi in ingresso. Consente ad esempio di
+  iscriversi solo ai mezzi di una provincia, o solo con destinazione un
+  ospedale specifico. ~250 righe di codice nuove, raddoppia la superficie
+  di test (gestione `/stop`, blocco del bot → 403 in broadcast, concorrenza
+  su SQLite in WAL).
+
+### Canali di notifica alternativi
+
+- **Discord / ntfy.sh / Signal / email** come destinazioni affiancabili o
+  alternative a Telegram. Astraibile dietro un'interfaccia `Notifier` con
+  più implementazioni.
+
+### Filtri e geofencing
+
+- **Fascia oraria** per silenziare le notifiche fuori orario (es. mute fra
+  01:00 e 06:00 se non vuoi essere svegliato).
+- **Geofencing**. Notifica quando un mezzo entra/esce da un'area definita
+  (es. "Falco 2 è appena entrato in Carnia"). Riusa la logica haversine già
+  presente per il lookup dei siti di atterraggio.
