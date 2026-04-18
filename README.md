@@ -1,50 +1,92 @@
 # heli-tracker
 
-Servizio che traccia una lista di elicotteri (pensato per elisoccorso FVG e Veneto) via **OpenSky Network** e invia una notifica **Telegram** quando decollano o atterrano. Pronto per il deploy su **Fly.io** nel free tier.
+Servizio Python che traccia una lista di elicotteri (pensato per elisoccorso
+FVG e Veneto) via **OpenSky Network** con fallback **adsb.lol** e notifica su
+**Telegram** i decolli e gli atterraggi. Le notifiche arrivano sia in un
+**canale broadcast** (firehose) sia via **bot in DM** con filtri per mezzo
+scelti dall'utente. Deploy su **Fly.io** nel free tier, stato persistente
+su volume.
+
+---
 
 ## Cosa fa
 
-- Poll a intervalli regolari dello stato ADS-B degli elicotteri configurati.
-- Rileva transizioni `on_ground: true → false` (DECOLLO) e viceversa (ATTERRAGGIO).
-- Invia un messaggio Telegram con callsign, posizione, link a Google Maps, ADS-B Exchange e Flightradar24 per il tracking live.
-- Resolve automaticamente gli ICAO24 hex a partire dalle marche (es. `I-GOOO`) via OpenSky.
+- Poll ogni ~45 s dello stato ADS-B dei mezzi configurati (OpenSky primario,
+  adsb.lol come fallback per gli ICAO non visti — utile nelle zone alpine
+  dove OpenSky ha copertura scarsa).
+- Rileva transizioni `on_ground: true → false` (DECOLLO) e viceversa
+  (ATTERRAGGIO) e notifica su Telegram.
+- Il messaggio di atterraggio include **durata del volo, distanza coperta,
+  quota e velocità massime**, e il **nome dell'ospedale/base** se il punto di
+  landing cade entro il raggio configurato in `landing_sites.yaml` (altrimenti
+  coordinate raw + link Google Maps).
+- Al landing, se ha raccolto almeno 2 waypoint, **allega un PNG della rotta**
+  disegnata su mappa OpenStreetMap.
+- Se il mezzo esce dalla copertura ADS-B per 8 cicli consecutivi (~6 min),
+  dichiara un **landing inferito** con wording esplicito ("segnale perso") per
+  non spacciare un buco di segnale come un atterraggio confermato.
+- Tutti i voli completati vengono registrati in **SQLite** su volume Fly per
+  abilitare statistiche (`/stats`, `/last` dal bot).
+- Un **alert** automatico avvisa l'admin se OpenSky è irresponsive per ≥ 10
+  poll (~7.5 min); intanto il fallback adsb.lol garantisce la continuità.
+
+---
+
+## Architettura
+
+```
+main.py              orchestratore, spawn dei thread
+detector.py          Helicopter, LandingSite, AdsbClient (OpenSky + adsb.lol),
+                     geo helpers, formattazione messaggi, render_track_png,
+                     process_update
+storage.py           SQLite (WAL): subscribers, subscriptions, flights, bot_state
+telegram_bot.py      TelegramClient, TelegramNotifier (broadcast),
+                     TelegramPoller (getUpdates), CommandHandler
+```
+
+Due thread:
+
+- **main**: poll loop OpenSky/adsb.lol → `process_update` → `broadcast_event`.
+- **telegram-poller**: long-polling `getUpdates`, dispaccia i comandi bot.
+
+---
 
 ## Prerequisiti
 
-1. **Account Telegram** e un bot creato da [@BotFather](https://t.me/BotFather). Ottieni il `TELEGRAM_BOT_TOKEN`.
-2. **chat_id**: scrivi un messaggio al bot, poi apri `https://api.telegram.org/bot<TOKEN>/getUpdates` e copia il campo `chat.id`. (Per un canale: aggiungi il bot come admin.)
-3. **Account OpenSky** (gratuito) su [opensky-network.org](https://opensky-network.org/) per aumentare il rate limit. Senza credenziali l'API anonima è troppo limitata.
+1. **Bot Telegram** creato da [@BotFather](https://t.me/BotFather) →
+   ottieni il `TELEGRAM_BOT_TOKEN`.
+2. **Canale Telegram** (privato o pubblico) in cui postare il firehose:
+   aggiungi il bot come admin con permesso "Post Messages" e ricava il
+   `chat_id` del canale (numero negativo che inizia con `-100…` per canali
+   privati, oppure `@nomecanale` per canali pubblici).
+3. **Account OpenSky** gratuito su [opensky-network.org](https://opensky-network.org/).
+   Senza credenziali l'API anonima non basta.
 4. **Account Fly.io** + `flyctl` installato ([guida](https://fly.io/docs/flyctl/install/)).
+5. **Il tuo `user_id` Telegram** (serve per il comando admin `/mock`). Lo trovi
+   scrivendo al tuo bot e guardando `chat.id` in `getUpdates`, oppure tramite
+   [@userinfobot](https://t.me/userinfobot).
 
-## Test locale rapido
-
-```bash
-cd heli-tracker
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# modifica .env con i tuoi token
-python main.py
-```
-
-All'avvio ti arriverà un messaggio Telegram "heli-tracker avviato" con la lista dei mezzi monitorati.
+---
 
 ## Deploy su Fly.io
 
 ```bash
-# 1. Login
+# 1. Login e creazione app
 fly auth login
+fly launch --no-deploy --copy-config --name <nome-app>
+# (aggiorna `app = ...` in fly.toml se il nome viene rinominato)
 
-# 2. Crea l'app (senza deployare subito). Può chiederti un nome diverso
-#    se "heli-tracker" è preso; in quel caso aggiorna `app = ...` in fly.toml.
-fly launch --no-deploy --copy-config --name heli-tracker
+# 2. Volume per lo storage (1 GB encrypted nel free allowance)
+fly volumes create data --size 1 --region cdg
 
-# 3. Imposta i segreti (MAI committare .env)
+# 3. Segreti
 fly secrets set \
   TELEGRAM_BOT_TOKEN="123456789:AA..." \
-  TELEGRAM_CHAT_ID="123456789" \
+  TELEGRAM_CHAT_ID="-1001234567890" \
+  TELEGRAM_ADMIN_USER_ID="<il_tuo_user_id>" \
   OPENSKY_USERNAME="tuo_user" \
-  OPENSKY_PASSWORD="tua_password"
+  OPENSKY_PASSWORD="tua_password" \
+  DB_PATH="/data/heli_tracker.db"
 
 # 4. Deploy
 fly deploy
@@ -53,134 +95,231 @@ fly deploy
 fly logs
 ```
 
-### Free tier notes
+Il primo boot inizializza il volume, crea lo schema SQLite e manda un
+messaggio di benvenuto al canale.
 
-Fly.io dà 3 macchine `shared-cpu-1x` 256MB sempre accese nel Free Allowance personale. Questo worker ne usa una. Restando in Europa (`primary_region = "cdg"`) la latenza verso OpenSky (infrastruttura in Germania) è minima.
+### Note operative
 
-> **Nota**: Fly al momento richiede l'aggiunta di una carta di credito in fase di signup per verifica antifrode, ma non addebita nulla se resti nel Free Allowance.
+- **Una sola machine**: `fly.toml` ha un `[[mounts]]` pinnato al volume `data`
+  in region `cdg`, quindi non supporta HA multi-machine (il volume è
+  region-locked e non replica). Dopo `fly deploy` la machine viene
+  **ricreata** per attaccare il volume, ma il DB persiste.
+- **Rigenerazione welcome**: ogni restart manda un nuovo messaggio di avvio al
+  canale. È un comportamento voluto: se lo vedi, il worker è su.
+- **Fly standby**: non usare `fly scale count N > 1` senza creare N volumi
+  separati, il deploy fallirà.
+
+---
+
+## Configurazione runtime (env)
+
+| Variabile                 | Default                  | Descrizione |
+|---------------------------|--------------------------|-------------|
+| `TELEGRAM_BOT_TOKEN`      | —                        | Token del bot (obbligatorio) |
+| `TELEGRAM_CHAT_ID`        | —                        | Canale broadcast (opzionale: senza, solo il bot in DM) |
+| `TELEGRAM_ADMIN_USER_ID`  | —                        | Tuo user_id Telegram; abilita `/mock` |
+| `OPENSKY_USERNAME`        | —                        | User OpenSky (consigliato) |
+| `OPENSKY_PASSWORD`        | —                        | Password OpenSky |
+| `POLL_INTERVAL`           | `45`                     | Secondi tra poll. Non sotto 10. |
+| `HELICOPTERS_FILE`        | `helicopters.yaml`       | Percorso config elicotteri |
+| `LANDING_SITES_FILE`      | `landing_sites.yaml`     | Percorso lookup siti |
+| `DB_PATH`                 | `heli_tracker.db`        | Path SQLite (in prod `/data/heli_tracker.db`) |
+| `LOG_LEVEL`               | `INFO`                   | `DEBUG` per vedere ogni poll |
+
+---
+
+## Modello d'uso
+
+### Canale (firehose)
+
+Chi vuole tutte le notifiche, senza configurazione: iscrizione al canale via
+invite link. Riceve ogni decollo/atterraggio di tutti i mezzi monitorati.
+Read-only.
+
+### Bot in DM (filtri per mezzo)
+
+Chi vuole selezionare quali mezzi seguire: apre il bot, `/start`, poi
+`/subscribe` per scegliere dalla inline keyboard.
+
+**Comandi disponibili:**
+
+| Comando            | Cosa fa |
+|--------------------|---------|
+| `/start`           | Attiva il bot, registra l'utente |
+| `/subscribe`       | Menu interattivo per iscriversi/disiscriversi dai mezzi |
+| `/list`            | Mostra le iscrizioni correnti |
+| `/all`             | Iscrive a tutti i mezzi |
+| `/none`            | Rimuove tutte le iscrizioni |
+| `/stats [giorni]`  | Aggregato voli ultimi N giorni (default 7) |
+| `/last`            | Ultimo volo per ciascun mezzo |
+| `/stop`            | Cancella l'utente dal bot |
+| `/help`            | Riepilogo comandi |
+| `/mock` (admin)    | Simula decollo+atterraggio in DM — non spamma canale né altri iscritti |
+
+Il canale e il bot sono indipendenti: puoi essere in entrambi senza
+duplicazioni di ruolo (il canale è firehose, il bot è filtrato per mezzo).
+
+---
 
 ## Configurare gli elicotteri
 
-Modifica `helicopters.yaml`. Ogni voce accetta:
+Modifica `helicopters.yaml`. Ogni voce:
 
 ```yaml
-- registration: I-GOOO           # marche ENAC
-  nickname: "Falco 1"            # nome visibile nelle notifiche
+- registration: I-GOOO
+  nickname: "Falco 1"
   base: "Campoformido (UD)"
   operator: "Elifriulia"
-  icao24: ""                     # opzionale: se vuoto, risolto all'avvio
+  icao24: "300816"    # opzionale; se vuoto viene risolto al boot via OpenSky
 ```
 
-Se la risoluzione automatica fallisce (il DB di OpenSky non sempre è aggiornato per gli elicotteri):
-- cerca il codice su [OpenSky Aircraft DB](https://opensky-network.org/aircraft-database-search)
-- oppure su [hexdb.io](https://hexdb.io)
-- oppure su Flightradar24 nell'URL di un volo passato
-- e incollalo nel campo `icao24`.
+Se il lookup automatico fallisce cerca il codice ICAO24 su
+[OpenSky Aircraft DB](https://opensky-network.org/aircraft-database-search),
+[hexdb.io](https://hexdb.io), o in un URL Flightradar24 di volo passato, e
+incollalo come `icao24`.
 
-Dopo modifiche a `helicopters.yaml`, serve un `fly deploy` per aggiornare il contenitore (il file viene copiato al build-time). In alternativa, monta il file come volume.
+Dopo modifiche serve `fly deploy` per copiare il nuovo YAML nel container.
 
-## Configurazione runtime
+## Configurare i siti di atterraggio
 
-Tutte le variabili d'ambiente sono descritte in `.env.example`. Le principali:
+`landing_sites.yaml` contiene una lista di ospedali HEMS / basi con
+coordinate e raggio di match:
 
-| Variabile | Default | Descrizione |
-|-----------|---------|-------------|
-| `TELEGRAM_BOT_TOKEN` | — | Token del bot |
-| `TELEGRAM_CHAT_ID` | — | Destinatario delle notifiche |
-| `OPENSKY_USERNAME` | — | User OpenSky (consigliato) |
-| `OPENSKY_PASSWORD` | — | Password OpenSky |
-| `POLL_INTERVAL` | `45` | Secondi tra poll. Non scendere sotto 10s. |
-| `HELICOPTERS_FILE` | `helicopters.yaml` | Percorso del file config |
-| `LOG_LEVEL` | `INFO` | `DEBUG` per vedere tutti i poll |
+```yaml
+sites:
+  - name: "Ospedale Cattinara"
+    city: "Trieste"
+    lat: 45.6285
+    lon: 13.7960
+    radius_m: 500
+```
+
+Al landing lo script cerca il sito più vicino entro il suo `radius_m`. Le
+coordinate iniziali sono stime: quando vedi il primo atterraggio reale in un
+sito noto, raffina `lat`/`lon` con la media dei punti osservati e tieni
+`radius_m` fra 300 e 600 m.
+
+---
+
+## Operazioni comuni
+
+```bash
+# Log live
+fly logs
+
+# Shell nel container
+fly ssh console
+
+# Stato macchine
+fly status
+
+# Riavvio
+fly machine restart <id>
+
+# Ispezionare il DB (sqlite3 CLI non è nell'image slim, ma c'è Python):
+fly ssh console -C 'python -c "
+import sqlite3
+c = sqlite3.connect(\"/data/heli_tracker.db\")
+print(c.execute(\"SELECT helicopter_key, takeoff_ts, duration_s, distance_km, landing_site, inferred FROM flights ORDER BY takeoff_ts DESC LIMIT 10\").fetchall())
+"'
+```
+
+### Lanciare un mock da Telegram
+
+Scrivi `/mock` al bot dal tuo account admin: arrivano 2 messaggi `[TEST]` in
+DM (decollo + atterraggio a Cattinara) senza spammare canale o iscritti.
+
+### Lanciare un mock da shell
+
+```bash
+ENV_DUMP=$(fly ssh console -C env 2>&1)
+eval "$(printf '%s\n' "$ENV_DUMP" | grep -E '^(TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID)=' | sed 's/^/export /')"
+.venv/bin/python scripts/mock_test.py
+```
+
+Manda i messaggi al `TELEGRAM_CHAT_ID` (di default il canale, con prefisso
+`[TEST]` sul nickname per distinguerli dai decolli veri).
+
+---
 
 ## Limiti noti
 
-- **Copertura ADS-B in montagna**: in Cadore, Carnia e Alpi Giulie a bassa quota spesso non c'è ricezione. Il volo può "sparire" per diversi minuti e poi ricomparire. Lo script usa `OFFLINE_CYCLES_FOR_LANDED = 4` per evitare falsi atterraggi: solo dopo 4 poll consecutivi senza contatto notifica l'atterraggio.
-- **Trasponder spento / Mode C**: alcuni elicotteri di Stato o militari non appaiono su reti pubbliche. Gli HEMS regionali sono normalmente ADS-B attivi.
-- **Latenza**: con `POLL_INTERVAL=45` la notifica arriva entro ~45-90 secondi dal decollo effettivo. Per latenza minore, abbassa il valore ma attento alla quota OpenSky.
-- **Rate limit**: con account OpenSky base hai ~4000 richieste/giorno. A 45s di intervallo sono ~1920/giorno, ampiamente sufficienti.
+- **Copertura ADS-B in montagna**. In Cadore, Carnia e Alpi Giulie a bassa
+  quota può mancare segnale per 10+ min. Con soglia di 8 cicli (~6 min)
+  diamo un "landing inferito" esplicito che chiarisce l'incertezza; il
+  fallback adsb.lol (rete di ricevitori diversa) recupera parte dei mezzi
+  non visti da OpenSky.
+- **Transponder in hover sul mare / piattaforme**. Il bit `on_ground` dei
+  Mode-S sugli elicotteri è talora legato al collective / regime rotore e
+  può flickerare durante hover: possibili false notifiche di atterraggio
+  con posizione sopra il mare (tipicamente su missioni SAR marittime).
+- **Latenza**: con `POLL_INTERVAL=45` la notifica di decollo arriva entro
+  ~45-90 s dall'evento reale.
+- **Rate limit OpenSky**: ~4000 richieste/giorno con account base → a 45 s
+  di intervallo siamo a ~1920/giorno. Ampiamente entro i limiti.
+- **Rate limit Telegram**: 30 msg/s globali del bot, 1 msg/s per chat.
+  Rilevante solo sopra i 30 iscritti simultanei al broadcast.
+- **Volume region-locked**: un guasto hardware sulla machine `cdg` richiede
+  recovery manuale. Accettabile per il caso d'uso hobby.
+
+---
 
 ## Struttura del progetto
 
 ```
 heli-tracker/
-├── main.py              # poller + logica decollo/atterraggio + Telegram
-├── helicopters.yaml     # lista elicotteri da tracciare
+├── main.py              # Config, orchestratore, spawn thread
+├── detector.py          # Helicopter, AdsbClient, process_update, rendering
+├── storage.py           # SQLite wrapper (WAL, thread-safe)
+├── telegram_bot.py      # Client, Notifier, Poller, CommandHandler
+├── helicopters.yaml     # Lista elicotteri monitorati
+├── landing_sites.yaml   # Ospedali / basi per il lookup
 ├── requirements.txt
 ├── Dockerfile
-├── fly.toml             # config Fly.io
-├── .dockerignore
-├── .env.example         # template variabili d'ambiente
+├── fly.toml             # include [[mounts]] per /data
+├── scripts/
+│   └── mock_test.py     # smoke test locale via canale
+├── .gitignore
 └── README.md
 ```
 
+---
+
 ## Possibili miglioramenti
 
-Lista di estensioni valutate e rimandate, raggruppate per area. Ognuna è
-indipendente dalle altre; ordina per rapporto valore/sforzo in base al tuo
-contesto.
+Lista di estensioni valutate e rimandate. Le prime tre sono già state
+implementate nelle ultime iterazioni e sono marcate con ✅.
 
 ### Qualità dei messaggi
 
-- **Traccia del volo come immagine**. Accumulare i waypoint osservati durante
-  il volo e allegare al messaggio di atterraggio un PNG generato via
-  `py-staticmaps` (o simile) con la rotta sovrapposta su basemap. Effetto visivo
-  forte, nessuna persistenza richiesta (solo RAM).
-- **Classificazione tipo missione**. Euristica su callsign, orario e pattern di
-  volo (hover prolungato = recupero, cruise rettilineo punto-punto =
-  trasferimento, volo notturno = HEMS notturno abilitato). Richiede aggregazione
-  di più poll.
+- ✅ Durata / distanza / quota max / velocità max nell'atterraggio.
+- ✅ Lookup ospedale/base via `landing_sites.yaml`.
+- ✅ PNG della rotta sovrapposta a OpenStreetMap al landing.
+- **Classificazione tipo missione**. Euristica su callsign, orario e pattern
+  di volo (hover prolungato = recupero, cruise rettilineo = trasferimento,
+  volo notturno = HEMS notturno abilitato).
 
 ### Affidabilità dei dati
 
-- **Fallback adsb.lol / airplanes.live**. Integrare un secondo provider ADS-B
-  no-filter oltre a OpenSky (REST, no-auth, zero costi). Migliora la copertura
-  nelle zone montuose dove i ricevitori OpenSky scarseggiano (Carnia, Cadore,
-  Dolomiti). Implementazione: `OpenSkyClient` diventa `AdsbClient` che chiama
-  OpenSky e poi adsb.lol per gli ICAO non visti, merge con priorità al
-  `last_contact` più fresco.
-- **Backoff + alert su fallimenti OpenSky**. Oggi un'outage prolungata del
-  provider (o della rete Fly) passa silenziosa. Aggiungere exponential backoff
-  su errori consecutivi e una notifica Telegram dopo N cicli falliti.
-- **Health check esterno**. Worker muto da >2h = possibile deadlock silenzioso
-  non rilevabile dall'interno. Un cron su un servizio esterno
-  (UptimeRobot, healthchecks.io) che pinga un endpoint HTTP minimale esposto
-  dal container fornirebbe allerta indipendente.
+- ✅ Fallback adsb.lol sui mezzi non visti da OpenSky.
+- ✅ Alert all'admin dopo N cicli consecutivi di OpenSky down.
+- **Health check esterno** (UptimeRobot / healthchecks.io) per allerta
+  indipendente su worker muto.
 
-### Storico e statistiche
+### Storico e distribuzione
 
-- **Persistenza SQLite su volume Fly**. Salvare ogni volo
-  `(takeoff_ts, landing_ts, callsign, distanza, sito, durata)` per abilitare
-  statistiche (voli/giorno, tempo totale di volo per mezzo, destinazioni più
-  frequenti). Richiede `fly volumes create` e un `[[mounts]]` in `fly.toml`.
-  Abilita anche un futuro comando `/stats` e una dashboard.
-- **Dashboard web**. Flask/FastAPI + Leaflet per vedere mezzi su mappa live,
-  storico voli e filtri. Richiede esporre un `[http_service]` sul container
-  (oggi è worker puro).
+- ✅ Storico voli in SQLite (`flights`) + comandi `/stats`, `/last`.
+- ✅ Bot multi-utente con filtri per mezzo (`/subscribe`).
+- **Dashboard web**: Flask/FastAPI + Leaflet per vedere mezzi e storico voli
+  su mappa. Richiede esporre un `[http_service]` sul container.
 
-### Distribuzione e multi-utente
+### Notifier alternativi
 
-- **Canale pubblico** in aggiunta a quello privato. Secondo target Telegram,
-  eventualmente filtrato sui mezzi "pubblici". Solo config, niente codice.
-- **Bot self-service con preferenze per utente**. Refactor a multi-tenant:
-  comando `/subscribe` con inline keyboard per selezionare quali elicotteri
-  seguire, persistenza in SQLite (`subscribers` + `subscriptions`), secondo
-  thread per `getUpdates` sui messaggi in ingresso. Consente ad esempio di
-  iscriversi solo ai mezzi di una provincia, o solo con destinazione un
-  ospedale specifico. ~250 righe di codice nuove, raddoppia la superficie
-  di test (gestione `/stop`, blocco del bot → 403 in broadcast, concorrenza
-  su SQLite in WAL).
-
-### Canali di notifica alternativi
-
-- **Discord / ntfy.sh / Signal / email** come destinazioni affiancabili o
-  alternative a Telegram. Astraibile dietro un'interfaccia `Notifier` con
+- Discord / ntfy.sh / Signal / email come destinazioni affiancabili o
+  alternative a Telegram. Astraibile dietro un `Notifier` protocol con
   più implementazioni.
 
-### Filtri e geofencing
+### Filtri
 
 - **Fascia oraria** per silenziare le notifiche fuori orario (es. mute fra
   01:00 e 06:00 se non vuoi essere svegliato).
-- **Geofencing**. Notifica quando un mezzo entra/esce da un'area definita
-  (es. "Falco 2 è appena entrato in Carnia"). Riusa la logica haversine già
-  presente per il lookup dei siti di atterraggio.
