@@ -36,8 +36,10 @@ KT_TO_MS = 0.514444
 # e non rumore dei dati ADS-B sul piazzale. ~10 m/s ≈ 20 nodi.
 TAKEOFF_MIN_VELOCITY_MS = 10.0
 
-# Numero di poll consecutivi senza contatto prima di dichiarare l'atterraggio.
-OFFLINE_CYCLES_FOR_LANDED = 4
+# Numero di poll consecutivi senza contatto prima di dichiarare un "landing inferito"
+# (segnale perso). Con POLL_INTERVAL=45s sono ~6 minuti — abbastanza per tollerare
+# buchi di copertura in valle senza dichiarare falsi atterraggi in hover/cruise.
+OFFLINE_CYCLES_FOR_LANDED = 8
 
 # Raggio di default in metri per il match di un sito d'atterraggio se il YAML
 # non specifica `radius_m` sulla voce.
@@ -369,6 +371,53 @@ def format_takeoff(h: Helicopter, state: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def format_landing_inferred(
+    h: Helicopter,
+    sites: list[LandingSite],
+) -> str:
+    """Messaggio di 'landing inferito' quando il mezzo sparisce dall'ADS-B.
+
+    Usiamo un wording diverso da un landing confermato: in montagna un elicottero
+    può sparire dal network per parecchi minuti pur continuando a volare. Il
+    messaggio è onesto su questa incertezza e mostra l'ultimo punto noto, non
+    una posizione di atterraggio certa."""
+    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    minutes_since_contact = (
+        int((time.time() - h.last_seen_ts) / 60) if h.last_seen_ts else None
+    )
+
+    parts = [f"🛬 <b>ATTERRAGGIO (segnale perso)</b> — {h.display_name}"]
+    parts.append(f"Ora: {now}")
+    if minutes_since_contact is not None:
+        parts.append(f"Ultimo contatto ADS-B: {minutes_since_contact} min fa")
+    parts.append(
+        "<i>Probabilmente atterrato, ma il mezzo è uscito dalla copertura ADS-B; "
+        "potrebbe anche essere solo un buco di segnale in valle.</i>"
+    )
+
+    if h.flight_start_ts is not None:
+        # La durata va calcolata fino all'ultimo contatto utile, non al "now"
+        end_ts = h.last_seen_ts if h.last_seen_ts else time.time()
+        duration = end_ts - h.flight_start_ts
+        parts.append(f"Durata (fino all'ultimo contatto): {format_duration(duration)}")
+    if h.flight_distance_km > 0:
+        parts.append(f"Distanza tracciata: {h.flight_distance_km:.0f} km")
+    if h.flight_max_altitude_m is not None:
+        parts.append(f"Quota max: {int(h.flight_max_altitude_m)} m")
+
+    if h.last_position is not None:
+        lat, lon = h.last_position
+        site = find_landing_site(lat, lon, sites)
+        if site is not None:
+            parts.append(f"Ultimo punto noto: <b>{site.label}</b>")
+            parts.append(f'<a href="{maps_link(site.lat, site.lon)}">📍 Mappa</a>')
+        else:
+            parts.append(f"Ultimo punto noto: {lat:.4f}, {lon:.4f}")
+            parts.append(f'<a href="{maps_link(lat, lon)}">📍 Mappa</a>')
+
+    return "\n".join(parts)
+
+
 def format_landing(
     h: Helicopter,
     state: dict[str, Any] | None,
@@ -539,10 +588,26 @@ def _emit_landing(
     sites: list[LandingSite],
     notifier: Notifier,
     storage: Any | None,
+    inferred: bool = False,
 ) -> None:
-    """Formatta landing message, renderizza traccia, broadcasta, registra nel DB."""
-    text = format_landing(h, state, sites)
-    pos = _landed_position(h, state)
+    """Formatta landing message, renderizza traccia, broadcasta, registra nel DB.
+
+    `inferred=True` significa che il mezzo è sparito dalla rete ADS-B per N
+    cicli: non abbiamo certezza dell'atterraggio, quindi usiamo un messaggio
+    diverso e registriamo il volo col flag corrispondente.
+    """
+    if inferred:
+        text = format_landing_inferred(h, sites)
+        pos = h.last_position
+        # Al landing inferito l'ultimo punto noto può essere a bassa quota su un
+        # punto qualsiasi del percorso — la traccia PNG ha comunque valore ma
+        # va chiaro che NON include il touchdown.
+        landing_ts = int(h.last_seen_ts) if h.last_seen_ts else int(time.time())
+    else:
+        text = format_landing(h, state, sites)
+        pos = _landed_position(h, state)
+        landing_ts = int(time.time())
+
     png_path = render_track_png(h.flight_track) if h.flight_track else None
     notifier.broadcast_event(
         text=text, helicopter_key=h.icao24, photo_path=png_path
@@ -559,7 +624,7 @@ def _emit_landing(
             storage.record_flight(
                 helicopter_key=h.icao24,
                 takeoff_ts=int(h.flight_start_ts),
-                landing_ts=int(time.time()),
+                landing_ts=landing_ts,
                 distance_km=h.flight_distance_km or None,
                 max_altitude_m=h.flight_max_altitude_m,
                 max_velocity_ms=h.flight_max_velocity_ms,
@@ -567,6 +632,7 @@ def _emit_landing(
                 landing_position=pos,
                 landing_site=site.name if site else None,
                 callsign=h.flight_callsign,
+                inferred=inferred,
             )
         except Exception:
             log.exception("Errore salvando il volo di %s", h.display_name)
@@ -588,11 +654,12 @@ def process_update(
             h.missing_cycles += 1
             if h.missing_cycles >= OFFLINE_CYCLES_FOR_LANDED:
                 log.info(
-                    "%s: considerato atterrato (perso %d cicli)",
+                    "%s: landing INFERITO (perso %d cicli, ~%d min)",
                     h.display_name,
                     h.missing_cycles,
+                    int(h.missing_cycles * 45 / 60),
                 )
-                _emit_landing(h, None, sites, notifier, storage)
+                _emit_landing(h, None, sites, notifier, storage, inferred=True)
                 h.in_flight = False
                 h.last_on_ground = True
                 h.missing_cycles = 0

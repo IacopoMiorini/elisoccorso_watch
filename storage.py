@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS flights (
     landing_lat     REAL,
     landing_lon     REAL,
     landing_site    TEXT,
-    callsign        TEXT
+    callsign        TEXT,
+    inferred        INTEGER NOT NULL DEFAULT 0
 );
 
 -- Migrazione: la feature geofence è stata rimossa. Puliamo eventuali residui.
@@ -81,7 +82,22 @@ class Storage:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._write_lock = threading.Lock()
+
+    def _migrate(self) -> None:
+        """Migrazioni idempotenti su DB già esistenti.
+
+        SQLite non ha `ALTER TABLE ADD COLUMN IF NOT EXISTS`, quindi controlliamo
+        `PRAGMA table_info` e aggiungiamo le colonne mancanti.
+        """
+        cols_flights = {
+            r[1] for r in self._conn.execute("PRAGMA table_info(flights)").fetchall()
+        }
+        if "inferred" not in cols_flights:
+            self._conn.execute(
+                "ALTER TABLE flights ADD COLUMN inferred INTEGER NOT NULL DEFAULT 0"
+            )
 
     @contextmanager
     def _tx(self):
@@ -202,8 +218,12 @@ class Storage:
         landing_position: tuple[float, float] | None = None,
         landing_site: str | None = None,
         callsign: str | None = None,
+        inferred: bool = False,
     ) -> int:
-        """Registra un volo completato. Ritorna l'id generato."""
+        """Registra un volo completato. Ritorna l'id generato.
+
+        `inferred=True` se il landing è stato dedotto dalla perdita del segnale
+        ADS-B (nessun touchdown osservato)."""
         duration = max(0, int(landing_ts - takeoff_ts))
         t_lat, t_lon = takeoff_position if takeoff_position else (None, None)
         l_lat, l_lon = landing_position if landing_position else (None, None)
@@ -214,8 +234,8 @@ class Storage:
                     helicopter_key, takeoff_ts, landing_ts, duration_s,
                     distance_km, max_altitude_m, max_velocity_ms,
                     takeoff_lat, takeoff_lon, landing_lat, landing_lon,
-                    landing_site, callsign
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    landing_site, callsign, inferred
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     helicopter_key,
@@ -231,6 +251,7 @@ class Storage:
                     l_lon,
                     landing_site,
                     callsign,
+                    1 if inferred else 0,
                 ),
             )
             return int(cur.lastrowid or 0)
