@@ -9,7 +9,8 @@ WORKDIR /app
 COPY --chmod=0644 requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY --chmod=0644 main.py helicopters.yaml landing_sites.yaml ./
+COPY --chmod=0644 main.py detector.py storage.py telegram_bot.py \
+     helicopters.yaml landing_sites.yaml ./
 
 # File di config personalizzati si possono montare sovrascrivendo helicopters.yaml
 # oppure puntare HELICOPTERS_FILE a un volume.

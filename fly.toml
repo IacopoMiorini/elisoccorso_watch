@@ -18,6 +18,10 @@ primary_region = 'cdg'
 [processes]
   app = 'python main.py'
 
+[[mounts]]
+  source = 'data'
+  destination = '/data'
+
 [[vm]]
   size = 'shared-cpu-1x'
   memory = '256mb'

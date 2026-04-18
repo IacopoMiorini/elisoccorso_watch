@@ -1,31 +1,26 @@
-"""Mock test: simula un decollo e un atterraggio senza toccare OpenSky.
+"""Mock test: simula un decollo+atterraggio senza toccare OpenSky.
 
 Uso (dalla root del repo):
     TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... .venv/bin/python scripts/mock_test.py
 
-Prende il primo elicottero con ICAO24 valido da helicopters.yaml, gli
-mette un prefisso [TEST] nel nickname per distinguerlo dai decolli veri,
-e chiama process_update con due state vector fittizi: uno "in volo" e
-uno "a terra". Il worker in prod non viene toccato — questo script gira
-solo in locale contro l'API Telegram.
+Invia le due notifiche al `TELEGRAM_CHAT_ID` configurato (tipicamente il
+canale). Non tocca lo storage né i subscriber del bot — è solo uno smoke test
+del formato dei messaggi. Per testare la broadcast completa (canale +
+subscriber) serve un decollo vero o il comando /mock del bot (che invia solo
+all'admin).
 """
 
 from __future__ import annotations
 
 import logging
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from main import (  # noqa: E402
-    Config,
-    TelegramNotifier,
-    load_helicopters,
-    load_landing_sites,
-    process_update,
-)
+from detector import load_helicopters, load_landing_sites, simulate_flight  # noqa: E402
+from main import Config  # noqa: E402
+from telegram_bot import TelegramClient  # noqa: E402
 
 
 def main() -> int:
@@ -33,76 +28,21 @@ def main() -> int:
         level="INFO",
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-
     cfg = Config.from_env()
-    helis = load_helicopters(cfg.helicopters_file)
+    if not cfg.telegram_chat_id:
+        raise SystemExit("TELEGRAM_CHAT_ID non settato: non saprei a chi mandare.")
+
+    helis = [h for h in load_helicopters(cfg.helicopters_file) if h.icao24]
     sites = load_landing_sites(cfg.landing_sites_file)
-    target = next((h for h in helis if h.icao24), None)
-    if target is None:
-        raise SystemExit("Nessun elicottero con ICAO24 in helicopters.yaml")
 
-    target.nickname = f"[TEST] {target.nickname or target.registration or target.icao24}"
+    client = TelegramClient(cfg.telegram_token)
 
-    notifier = TelegramNotifier(cfg.telegram_token, cfg.telegram_chat_id)
+    def send(text: str) -> None:
+        client.send_message(cfg.telegram_chat_id, text)
 
-    print(f"[MOCK] target: {target.display_name} ({target.icao24})")
+    print(f"[MOCK] target chat_id = {cfg.telegram_chat_id}")
     print(f"[MOCK] landing sites caricati: {len(sites)}")
-
-    now = time.time()
-    # Decollo dalla base Elifriulia (Ronchi dei Legionari)
-    state_flying = {
-        "callsign": "MOCKFLY",
-        "origin_country": "Italy",
-        "time_position": now,
-        "last_contact": now,
-        "longitude": 13.4721,
-        "latitude": 45.8275,
-        "baro_altitude_m": 350.0,
-        "on_ground": False,
-        "velocity_ms": 45.0,
-        "heading_deg": 270.0,
-        "vertical_rate_ms": 5.0,
-        "geo_altitude_m": 360.0,
-    }
-
-    print("[MOCK] invio stato 'in volo' → attesa notifica DECOLLO")
-    process_update(target, state_flying, notifier, sites)
-
-    # Simula un waypoint intermedio a maggiore quota/velocità per popolare
-    # i massimi di volo e accumulare un po' di distanza (haversine).
-    state_cruise = {
-        **state_flying,
-        "latitude": 45.7500,
-        "longitude": 13.6500,
-        "baro_altitude_m": 1800.0,
-        "geo_altitude_m": 1820.0,
-        "velocity_ms": 68.0,
-    }
-    process_update(target, state_cruise, notifier, sites)
-
-    # Finge un volo già durato 18 minuti prima dell'atterraggio,
-    # altrimenti il messaggio mostrerebbe "< 1 min".
-    if target.flight_start_ts is not None:
-        target.flight_start_ts -= 18 * 60
-
-    time.sleep(2)
-
-    # Atterraggio esattamente sull'elisuperficie di Cattinara (Trieste),
-    # dovrebbe matchare il landing site corrispondente.
-    state_grounded = {
-        **state_flying,
-        "on_ground": True,
-        "velocity_ms": 0.0,
-        "vertical_rate_ms": 0.0,
-        "baro_altitude_m": 80.0,
-        "geo_altitude_m": 85.0,
-        "latitude": 45.6285,
-        "longitude": 13.7960,
-    }
-
-    print("[MOCK] invio stato 'a terra' → attesa notifica ATTERRAGGIO")
-    process_update(target, state_grounded, notifier, sites)
-
+    simulate_flight(helis, sites, send)
     print("[MOCK] fatto. Controlla Telegram.")
     return 0
 
