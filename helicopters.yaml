@@ -1,0 +1,88 @@
+# Lista degli elicotteri da tracciare.
+#
+# ICAO24 ricavati da Flightradar24 ad aprile 2026. Verifica periodicamente:
+# la flotta Elifriulia ruota fra contratti (FVG, Croazia, Lazio, ecc.) e alcuni
+# mezzi elencati potrebbero non essere più sulla base prevista.
+#
+# Ogni voce accetta:
+#   icao24       : 6 hex lower-case (OBBLIGATORIO se vuoi evitare lookup)
+#   registration : marche ENAC (es. I-GOOO)
+#   nickname     : nome leggibile mostrato nelle notifiche
+#   base         : base operativa (solo informativo)
+#   operator     : operatore
+
+helicopters:
+  # ========================================================================
+  # FVG / flotta Elifriulia (Campoformido UD + Ronchi dei Legionari GO)
+  # ========================================================================
+  # NB: I-GOOO ad aprile 2026 risulta operare regolarmente da Brač (BWK, Croazia)
+  # con callsign HEMS04 — probabilmente su contratto croato. Lo tengo in lista
+  # perché può tornare in FVG, ma aspettati poche notifiche "italiane".
+  - icao24: "300816"
+    registration: I-GOOO
+    nickname: "Elifriulia – I-GOOO (HEMS04)"
+    base: "Campoformido/Brač"
+    operator: "Elifriulia"
+
+  - icao24: "300796"
+    registration: I-MORE
+    nickname: "Elifriulia – I-MORE"
+    base: "Campoformido (UD)"
+    operator: "Elifriulia"
+
+  - icao24: "3008c4"
+    registration: I-DNAM
+    nickname: "Elifriulia – I-DNAM"
+    base: "Campoformido (UD)"
+    operator: "Elifriulia"
+
+  - icao24: "300936"
+    registration: I-CREW
+    nickname: "Elifriulia – I-CREW"
+    base: "Campoformido (UD)"
+    operator: "Elifriulia"
+
+  - icao24: "300670"
+    registration: I-MAKE
+    nickname: "Elifriulia – I-MAKE"
+    base: "Campoformido (UD)"
+    operator: "Elifriulia"
+
+  # I-RASH è un H125 single-engine (non configurato HEMS). Lo lascio commentato:
+  # non farà decolli di elisoccorso ma voli di servizio/training.
+  # - icao24: "3006bb"
+  #   registration: I-RASH
+  #   nickname: "Elifriulia – I-RASH (H125, non HEMS)"
+  #   operator: "Elifriulia"
+
+  # I-RESQ ad aprile 2026 opera su base Roma (QIR) con callsign ARES33.
+  # Lo lascio commentato: se torna a Nord, decommenta.
+  # - icao24: "3009bd"
+  #   registration: I-RESQ
+  #   nickname: "Elifriulia – I-RESQ (attualmente Roma)"
+  #   operator: "Elifriulia"
+
+  # ========================================================================
+  # Veneto / Pieve di Cadore – Avincis (ex Babcock MCS Italia)
+  # ========================================================================
+  - icao24: "300601"
+    registration: I-ZANL
+    nickname: "Falco 2 – Pieve di Cadore"
+    base: "Pieve di Cadore (BL)"
+    operator: "Avincis Aviation Italia"
+
+  # ========================================================================
+  # Veneto – Treviso / Padova / Verona – DA COMPLETARE
+  # ========================================================================
+  # Gli altri mezzi Veneto (Treviso, Padova, Verona) sono operati da Avincis.
+  # Gli ICAO24 cambiano frequentemente con la rotazione. Per trovarli:
+  #   1. Vai su https://globe.adsbexchange.com e imposta un filtro geografico
+  #      sulla zona (es. Padova) durante una missione reale.
+  #   2. Oppure cerca su https://www.flightradar24.com/data/airlines/-elh
+  #      la flotta Avincis e identifica gli H145/AW169 italiani.
+  #   3. Aggiungi qui la registrazione: lo script risolve l'ICAO24 al boot.
+  # Esempio:
+  # - registration: I-XXXX
+  #   nickname: "Falco 1 – Treviso"
+  #   base: "Treviso"
+  #   operator: "Avincis"
