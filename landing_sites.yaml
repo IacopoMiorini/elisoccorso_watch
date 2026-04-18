@@ -1,0 +1,110 @@
+# Siti di atterraggio conosciuti (elisuperfici ospedaliere e basi HEMS).
+#
+# Al rilevamento di un atterraggio, lo script cerca il sito più vicino al punto
+# di landing entro `radius_m` e lo cita nel messaggio Telegram. Se nessun sito
+# matcha, il messaggio riporta solo lat/lon grezze.
+#
+# ATTENZIONE: le coordinate sotto sono stime ricavate da mappe pubbliche
+# (livello 18 zoom Google/OSM) e vanno verificate con dati di volo reali.
+# Quando vedi un atterraggio in un sito noto, aggiorna `lat`/`lon` con la
+# media dei punti osservati + tieni `radius_m` fra 300 e 600 m.
+#
+# Campi per ogni voce:
+#   name      : etichetta mostrata in Telegram (obbligatorio)
+#   city      : città (facoltativo, va in parentesi)
+#   lat/lon   : centro dell'elisuperficie in decimali
+#   radius_m  : raggio di match in metri (default 500 se omesso)
+
+sites:
+  # ============================================================
+  # FVG — ospedali con elisuperficie certificata H24
+  # ============================================================
+  - name: "Ospedale Cattinara"
+    city: "Trieste"
+    lat: 45.6285
+    lon: 13.7960
+    radius_m: 500
+
+  - name: "Ospedale Santa Maria della Misericordia"
+    city: "Udine"
+    lat: 46.0770
+    lon: 13.2400
+    radius_m: 500
+
+  - name: "Ospedale Santa Maria degli Angeli"
+    city: "Pordenone"
+    lat: 45.9611
+    lon: 12.6540
+    radius_m: 500
+
+  - name: "Ospedale San Polo"
+    city: "Monfalcone"
+    lat: 45.8000
+    lon: 13.5350
+    radius_m: 500
+
+  - name: "Ospedale San Giovanni"
+    city: "Gorizia"
+    lat: 45.9460
+    lon: 13.6210
+    radius_m: 500
+
+  - name: "Ospedale Sant'Antonio Abate"
+    city: "Tolmezzo"
+    lat: 46.3970
+    lon: 13.0200
+    radius_m: 500
+
+  # ============================================================
+  # Veneto — ospedali HEMS
+  # ============================================================
+  - name: "Ospedale Ca' Foncello"
+    city: "Treviso"
+    lat: 45.6775
+    lon: 12.2580
+    radius_m: 500
+
+  - name: "Azienda Ospedaliera"
+    city: "Padova"
+    lat: 45.4025
+    lon: 11.8810
+    radius_m: 600
+
+  - name: "Ospedale Borgo Trento"
+    city: "Verona"
+    lat: 45.4550
+    lon: 10.9880
+    radius_m: 500
+
+  - name: "Ospedale San Martino"
+    city: "Belluno"
+    lat: 46.1395
+    lon: 12.2170
+    radius_m: 500
+
+  - name: "Ospedale Santa Maria del Prato"
+    city: "Feltre"
+    lat: 46.0175
+    lon: 11.9100
+    radius_m: 500
+
+  - name: "Ospedale di Pieve di Cadore"
+    city: "Pieve di Cadore"
+    lat: 46.4330
+    lon: 12.3740
+    radius_m: 500
+
+  # ============================================================
+  # Basi operative
+  # ============================================================
+  - name: "Base Elifriulia (Ronchi dei Legionari)"
+    city: "Ronchi dei Legionari"
+    lat: 45.8275
+    lon: 13.4721
+    radius_m: 800
+
+  - name: "Base Avincis – Pieve di Cadore"
+    city: "Pieve di Cadore"
+    lat: 46.4330
+    lon: 12.3740
+    radius_m: 500

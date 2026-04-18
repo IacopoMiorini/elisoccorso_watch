@@ -23,6 +23,7 @@ from main import (  # noqa: E402
     Config,
     TelegramNotifier,
     load_helicopters,
+    load_landing_sites,
     process_update,
 )
 
@@ -35,6 +36,7 @@ def main() -> int:
 
     cfg = Config.from_env()
     helis = load_helicopters(cfg.helicopters_file)
+    sites = load_landing_sites(cfg.landing_sites_file)
     target = next((h for h in helis if h.icao24), None)
     if target is None:
         raise SystemExit("Nessun elicottero con ICAO24 in helicopters.yaml")
@@ -44,14 +46,16 @@ def main() -> int:
     notifier = TelegramNotifier(cfg.telegram_token, cfg.telegram_chat_id)
 
     print(f"[MOCK] target: {target.display_name} ({target.icao24})")
+    print(f"[MOCK] landing sites caricati: {len(sites)}")
 
     now = time.time()
+    # Decollo dalla base Elifriulia (Ronchi dei Legionari)
     state_flying = {
         "callsign": "MOCKFLY",
         "origin_country": "Italy",
         "time_position": now,
         "last_contact": now,
-        "longitude": 13.4821,
+        "longitude": 13.4721,
         "latitude": 45.8275,
         "baro_altitude_m": 350.0,
         "on_ground": False,
@@ -62,10 +66,29 @@ def main() -> int:
     }
 
     print("[MOCK] invio stato 'in volo' → attesa notifica DECOLLO")
-    process_update(target, state_flying, notifier)
+    process_update(target, state_flying, notifier, sites)
+
+    # Simula un waypoint intermedio a maggiore quota/velocità per popolare
+    # i massimi di volo e accumulare un po' di distanza (haversine).
+    state_cruise = {
+        **state_flying,
+        "latitude": 45.7500,
+        "longitude": 13.6500,
+        "baro_altitude_m": 1800.0,
+        "geo_altitude_m": 1820.0,
+        "velocity_ms": 68.0,
+    }
+    process_update(target, state_cruise, notifier, sites)
+
+    # Finge un volo già durato 18 minuti prima dell'atterraggio,
+    # altrimenti il messaggio mostrerebbe "< 1 min".
+    if target.flight_start_ts is not None:
+        target.flight_start_ts -= 18 * 60
 
     time.sleep(2)
 
+    # Atterraggio esattamente sull'elisuperficie di Cattinara (Trieste),
+    # dovrebbe matchare il landing site corrispondente.
     state_grounded = {
         **state_flying,
         "on_ground": True,
@@ -73,12 +96,12 @@ def main() -> int:
         "vertical_rate_ms": 0.0,
         "baro_altitude_m": 80.0,
         "geo_altitude_m": 85.0,
-        "latitude": 46.0320,
-        "longitude": 13.1870,
+        "latitude": 45.6285,
+        "longitude": 13.7960,
     }
 
     print("[MOCK] invio stato 'a terra' → attesa notifica ATTERRAGGIO")
-    process_update(target, state_grounded, notifier)
+    process_update(target, state_grounded, notifier, sites)
 
     print("[MOCK] fatto. Controlla Telegram.")
     return 0
