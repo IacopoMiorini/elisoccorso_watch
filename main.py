@@ -125,6 +125,17 @@ def main() -> int:
     )
 
     tg_client = TelegramClient(cfg.telegram_token)
+    tg_client.set_my_commands(
+        [
+            {"command": "start", "description": "Attiva il bot"},
+            {"command": "subscribe", "description": "Scegli quali mezzi seguire"},
+            {"command": "list", "description": "Mostra le tue iscrizioni"},
+            {"command": "all", "description": "Iscriviti a tutti i mezzi"},
+            {"command": "none", "description": "Rimuovi tutte le iscrizioni"},
+            {"command": "stop", "description": "Cancellati dal bot"},
+            {"command": "help", "description": "Guida ai comandi"},
+        ]
+    )
     notifier = TelegramNotifier(tg_client, cfg.telegram_chat_id, storage)
     handler = CommandHandler(notifier, storage, tracked, sites, cfg.admin_chat_id)
 

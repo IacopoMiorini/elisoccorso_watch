@@ -99,6 +99,18 @@ class TelegramClient:
         except requests.RequestException as e:
             log.warning("answerCallbackQuery error: %s", e)
 
+    def set_my_commands(self, commands: list[dict[str, str]]) -> None:
+        """Registra il menu comandi in Telegram: fa apparire l'icona '/'
+        nella chat e abilita l'autocomplete."""
+        try:
+            self.session.post(
+                f"{self.base}/setMyCommands",
+                json={"commands": commands},
+                timeout=10,
+            )
+        except requests.RequestException as e:
+            log.warning("setMyCommands error: %s", e)
+
     def get_updates(
         self, offset: int | None, timeout_s: int = 25
     ) -> list[dict[str, Any]]:
