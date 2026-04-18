@@ -28,7 +28,6 @@ from detector import (
     Helicopter,
     LandingSite,
     format_duration,
-    haversine_km,
     simulate_flight,
 )
 from storage import Storage
@@ -197,28 +196,14 @@ class TelegramNotifier:
         self,
         text: str,
         helicopter_key: str,
-        position: tuple[float, float] | None = None,
         photo_path: Path | None = None,
     ) -> None:
-        # 1. Canale: sempre, niente annotazione geofence
+        # Canale: sempre, se configurato
         if self.channel_chat_id:
             self._deliver(self.channel_chat_id, text, photo_path)
-        # 2. Subscriber del bot: annota se il punto cade in una loro zona
+        # Subscriber del bot iscritti a questo specifico mezzo
         for chat_id in self.storage.subscribers_for(helicopter_key):
-            user_text = text
-            if position is not None:
-                zone = self._match_user_geofence(chat_id, position)
-                if zone is not None:
-                    user_text = f"📍 <b>In zona {zone['name']}</b>\n\n{text}"
-            self._deliver(chat_id, user_text, photo_path)
-
-    def _match_user_geofence(
-        self, chat_id: int, position: tuple[float, float]
-    ) -> dict | None:
-        for z in self.storage.geofences_of(chat_id):
-            if haversine_km(position[0], position[1], z["lat"], z["lon"]) <= z["radius_km"]:
-                return z
-        return None
+            self._deliver(chat_id, text, photo_path)
 
     def send_direct(
         self,
@@ -287,11 +272,6 @@ HELP_TEXT = (
     "<b>Statistiche:</b>\n"
     "/stats [giorni] — voli registrati (default ultimi 7 giorni)\n"
     "/last — ultimo volo per ciascun mezzo\n\n"
-    "<b>Zone (geofence personali):</b>\n"
-    "/zone_add &lt;nome&gt; &lt;lat&gt; &lt;lon&gt; &lt;raggio_km&gt;\n"
-    "/zone_list\n"
-    "/zone_del &lt;nome&gt;\n"
-    "Quando un evento cade in una tua zona il messaggio lo segnala in cima.\n\n"
     "/help — rivedi questo messaggio"
 )
 
@@ -333,12 +313,6 @@ class CommandHandler:
         if cmd == "/stats":
             self.cmd_stats(chat_id, rest)
             return
-        if cmd == "/zone_add":
-            self.cmd_zone_add(chat_id, rest)
-            return
-        if cmd == "/zone_del":
-            self.cmd_zone_del(chat_id, rest)
-            return
 
         handlers: dict[str, Callable[[int], None]] = {
             "/start": self.cmd_start,
@@ -350,7 +324,6 @@ class CommandHandler:
             "/stop": self.cmd_stop,
             "/mock": self.cmd_mock,
             "/last": self.cmd_last,
-            "/zone_list": self.cmd_zone_list,
         }
         fn = handlers.get(cmd)
         if fn is None:
@@ -552,72 +525,6 @@ class CommandHandler:
             lines.append("\n".join(bits))
         self.notifier.send_direct(chat_id, "\n".join(lines))
 
-    # --- geofences -----------------------------------------------------------
-
-    def cmd_zone_add(self, chat_id: int, arg: str) -> None:
-        parts = arg.split()
-        if len(parts) != 4:
-            self.notifier.send_direct(
-                chat_id,
-                "Uso: <code>/zone_add &lt;nome&gt; &lt;lat&gt; &lt;lon&gt; &lt;raggio_km&gt;</code>\n"
-                "Esempio: <code>/zone_add Udine 46.0770 13.2400 15</code>",
-            )
-            return
-        name, lat_s, lon_s, r_s = parts
-        try:
-            lat = float(lat_s)
-            lon = float(lon_s)
-            radius = float(r_s)
-        except ValueError:
-            self.notifier.send_direct(
-                chat_id, "lat/lon/raggio devono essere numeri."
-            )
-            return
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180 and 0 < radius <= 500):
-            self.notifier.send_direct(
-                chat_id,
-                "Coordinate non valide o raggio fuori range (0 < raggio ≤ 500 km).",
-            )
-            return
-        self.storage.add_subscriber(chat_id)
-        ok = self.storage.add_geofence(chat_id, name, lat, lon, radius)
-        if ok:
-            self.notifier.send_direct(
-                chat_id,
-                f"✓ Zona <b>{name}</b> aggiunta ({lat:.4f}, {lon:.4f}, raggio {radius:g} km).",
-            )
-        else:
-            self.notifier.send_direct(
-                chat_id,
-                f"Esiste già una zona chiamata <b>{name}</b>. Usa /zone_del prima.",
-            )
-
-    def cmd_zone_list(self, chat_id: int) -> None:
-        zones = self.storage.geofences_of(chat_id)
-        if not zones:
-            self.notifier.send_direct(
-                chat_id,
-                "Nessuna zona definita. Aggiungi con /zone_add.",
-            )
-            return
-        lines = ["📍 <b>Le tue zone:</b>"]
-        for z in zones:
-            lines.append(
-                f"• <b>{z['name']}</b> — {z['lat']:.4f}, {z['lon']:.4f} "
-                f"(raggio {z['radius_km']:g} km)"
-            )
-        self.notifier.send_direct(chat_id, "\n".join(lines))
-
-    def cmd_zone_del(self, chat_id: int, arg: str) -> None:
-        name = arg.strip()
-        if not name:
-            self.notifier.send_direct(chat_id, "Uso: /zone_del &lt;nome&gt;")
-            return
-        ok = self.storage.remove_geofence(chat_id, name)
-        if ok:
-            self.notifier.send_direct(chat_id, f"✓ Zona <b>{name}</b> rimossa.")
-        else:
-            self.notifier.send_direct(chat_id, f"Nessuna zona trovata con nome <b>{name}</b>.")
 
 
 # ---------------------------------------------------------------------------

@@ -58,23 +58,14 @@ CREATE TABLE IF NOT EXISTS flights (
     callsign        TEXT
 );
 
-CREATE TABLE IF NOT EXISTS geofences (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id   INTEGER NOT NULL,
-    name      TEXT    NOT NULL,
-    lat       REAL    NOT NULL,
-    lon       REAL    NOT NULL,
-    radius_km REAL    NOT NULL,
-    UNIQUE (chat_id, name),
-    FOREIGN KEY (chat_id) REFERENCES subscribers(chat_id) ON DELETE CASCADE
-);
+-- Migrazione: la feature geofence è stata rimossa. Puliamo eventuali residui.
+DROP INDEX IF EXISTS idx_geofences_chat;
+DROP TABLE IF EXISTS geofences;
 
 CREATE INDEX IF NOT EXISTS idx_subscriptions_heli
     ON subscriptions(helicopter_key);
 CREATE INDEX IF NOT EXISTS idx_flights_heli_ts
     ON flights(helicopter_key, takeoff_ts DESC);
-CREATE INDEX IF NOT EXISTS idx_geofences_chat
-    ON geofences(chat_id);
 """
 
 
@@ -298,47 +289,6 @@ class Storage:
                 "landing_site": r[6],
                 "callsign": r[7],
             }
-            for r in rows
-        ]
-
-    # --- geofences -----------------------------------------------------------
-
-    def add_geofence(
-        self,
-        chat_id: int,
-        name: str,
-        lat: float,
-        lon: float,
-        radius_km: float,
-    ) -> bool:
-        """Inserisce una zona. Ritorna False se esiste già col nome dato per l'utente."""
-        with self._tx() as c:
-            try:
-                c.execute(
-                    "INSERT INTO geofences (chat_id, name, lat, lon, radius_km) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (chat_id, name, float(lat), float(lon), float(radius_km)),
-                )
-                return True
-            except sqlite3.IntegrityError:
-                return False
-
-    def remove_geofence(self, chat_id: int, name: str) -> bool:
-        with self._tx() as c:
-            cur = c.execute(
-                "DELETE FROM geofences WHERE chat_id = ? AND name = ?",
-                (chat_id, name),
-            )
-            return cur.rowcount > 0
-
-    def geofences_of(self, chat_id: int) -> list[dict]:
-        rows = self._conn.execute(
-            "SELECT name, lat, lon, radius_km FROM geofences WHERE chat_id = ? "
-            "ORDER BY name",
-            (chat_id,),
-        ).fetchall()
-        return [
-            {"name": r[0], "lat": float(r[1]), "lon": float(r[2]), "radius_km": float(r[3])}
             for r in rows
         ]
 
