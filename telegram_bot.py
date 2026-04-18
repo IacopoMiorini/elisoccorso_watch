@@ -18,6 +18,8 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 import requests
@@ -25,6 +27,8 @@ import requests
 from detector import (
     Helicopter,
     LandingSite,
+    format_duration,
+    haversine_km,
     simulate_flight,
 )
 from storage import Storage
@@ -111,6 +115,37 @@ class TelegramClient:
         except requests.RequestException as e:
             log.warning("setMyCommands error: %s", e)
 
+    def send_photo(
+        self,
+        chat_id: int | str,
+        photo_path: Path,
+        caption: str | None = None,
+    ) -> requests.Response | None:
+        """Upload di un'immagine via multipart + opzionale caption HTML.
+        Telegram consente caption fino a 1024 caratteri."""
+        try:
+            with open(photo_path, "rb") as fp:
+                files = {"photo": (photo_path.name, fp, "image/png")}
+                data: dict[str, Any] = {
+                    "chat_id": chat_id,
+                    "parse_mode": "HTML",
+                    "disable_notification": False,
+                }
+                if caption:
+                    data["caption"] = caption[:1024]
+                return self.session.post(
+                    f"{self.base}/sendPhoto",
+                    data=data,
+                    files=files,
+                    timeout=30,
+                )
+        except requests.RequestException as e:
+            log.warning("sendPhoto %s error: %s", chat_id, e)
+            return None
+        except OSError as e:
+            log.warning("sendPhoto cannot read %s: %s", photo_path, e)
+            return None
+
     def get_updates(
         self, offset: int | None, timeout_s: int = 25
     ) -> list[dict[str, Any]]:
@@ -140,9 +175,12 @@ class TelegramClient:
 
 
 class TelegramNotifier:
-    """Fan-out di un messaggio al canale + subscriber del bot (filtrati per icao24).
+    """Fan-out al canale + subscriber del bot (filtrati per icao24).
 
-    Implementa il `Notifier` protocol atteso da detector.process_update.
+    Implementa il `Notifier` protocol atteso da detector.process_update:
+    `broadcast_event` supporta sia testo sia foto+caption, e annota il
+    messaggio per-utente con un prefisso se il punto del volo cade in una
+    geofence dell'utente.
     """
 
     def __init__(
@@ -155,13 +193,32 @@ class TelegramNotifier:
         self.channel_chat_id = channel_chat_id
         self.storage = storage
 
-    def broadcast(self, text: str, helicopter_key: str) -> None:
-        # 1. Canale: ogni evento, sempre, se configurato
+    def broadcast_event(
+        self,
+        text: str,
+        helicopter_key: str,
+        position: tuple[float, float] | None = None,
+        photo_path: Path | None = None,
+    ) -> None:
+        # 1. Canale: sempre, niente annotazione geofence
         if self.channel_chat_id:
-            self._send_with_cleanup(self.channel_chat_id, text)
-        # 2. Subscriber del bot iscritti a questo specifico mezzo
+            self._deliver(self.channel_chat_id, text, photo_path)
+        # 2. Subscriber del bot: annota se il punto cade in una loro zona
         for chat_id in self.storage.subscribers_for(helicopter_key):
-            self._send_with_cleanup(chat_id, text)
+            user_text = text
+            if position is not None:
+                zone = self._match_user_geofence(chat_id, position)
+                if zone is not None:
+                    user_text = f"📍 <b>In zona {zone['name']}</b>\n\n{text}"
+            self._deliver(chat_id, user_text, photo_path)
+
+    def _match_user_geofence(
+        self, chat_id: int, position: tuple[float, float]
+    ) -> dict | None:
+        for z in self.storage.geofences_of(chat_id):
+            if haversine_km(position[0], position[1], z["lat"], z["lon"]) <= z["radius_km"]:
+                return z
+        return None
 
     def send_direct(
         self,
@@ -179,7 +236,23 @@ class TelegramNotifier:
             )
         return r
 
-    def _send_with_cleanup(self, chat_id: int | str, text: str) -> None:
+    def _deliver(
+        self,
+        chat_id: int | str,
+        text: str,
+        photo_path: Path | None,
+    ) -> None:
+        """Consegna un evento: foto+caption se possibile, altrimenti testo."""
+        if photo_path is not None and photo_path.exists():
+            r = self.client.send_photo(chat_id, photo_path, caption=text)
+            if r is not None and r.status_code == 200:
+                return
+            # Fallback: se sendPhoto fallisce (es. caption troppo lunga o rete
+            # instabile), mandiamo almeno il testo per non perdere l'evento.
+            log.info("sendPhoto fallito per %s, ripiego su testo.", chat_id)
+        self._send_text_with_cleanup(chat_id, text)
+
+    def _send_text_with_cleanup(self, chat_id: int | str, text: str) -> None:
         r = self.send_direct(chat_id, text)
         if r is None:
             return
@@ -205,12 +278,20 @@ class TelegramNotifier:
 HELP_TEXT = (
     "✅ <b>heli-tracker bot</b>\n\n"
     "Ti notifico decolli e atterraggi degli elicotteri di elisoccorso che scegli.\n\n"
-    "<b>Comandi disponibili:</b>\n"
+    "<b>Iscrizioni:</b>\n"
     "/subscribe — scegli quali mezzi seguire (menu interattivo)\n"
     "/list — vedi le tue iscrizioni attuali\n"
     "/all — iscriviti a tutti i mezzi\n"
     "/none — rimuovi tutte le iscrizioni\n"
-    "/stop — cancellati del tutto dal bot\n"
+    "/stop — cancellati del tutto dal bot\n\n"
+    "<b>Statistiche:</b>\n"
+    "/stats [giorni] — voli registrati (default ultimi 7 giorni)\n"
+    "/last — ultimo volo per ciascun mezzo\n\n"
+    "<b>Zone (geofence personali):</b>\n"
+    "/zone_add &lt;nome&gt; &lt;lat&gt; &lt;lon&gt; &lt;raggio_km&gt;\n"
+    "/zone_list\n"
+    "/zone_del &lt;nome&gt;\n"
+    "Quando un evento cade in una tua zona il messaggio lo segnala in cima.\n\n"
     "/help — rivedi questo messaggio"
 )
 
@@ -246,6 +327,18 @@ class CommandHandler:
         if not text.startswith("/"):
             return
         cmd = text.split(None, 1)[0].split("@", 1)[0]
+        rest = text[len(cmd):].strip()
+
+        # Comandi che prendono argomenti testuali
+        if cmd == "/stats":
+            self.cmd_stats(chat_id, rest)
+            return
+        if cmd == "/zone_add":
+            self.cmd_zone_add(chat_id, rest)
+            return
+        if cmd == "/zone_del":
+            self.cmd_zone_del(chat_id, rest)
+            return
 
         handlers: dict[str, Callable[[int], None]] = {
             "/start": self.cmd_start,
@@ -256,6 +349,8 @@ class CommandHandler:
             "/none": self.cmd_none,
             "/stop": self.cmd_stop,
             "/mock": self.cmd_mock,
+            "/last": self.cmd_last,
+            "/zone_list": self.cmd_zone_list,
         }
         fn = handlers.get(cmd)
         if fn is None:
@@ -390,6 +485,139 @@ class CommandHandler:
         except Exception as e:
             log.exception("Errore in /mock")
             self.notifier.send_direct(chat_id, f"Errore: {e}")
+
+    # --- statistiche ---------------------------------------------------------
+
+    def cmd_stats(self, chat_id: int, arg: str) -> None:
+        try:
+            days = int(arg) if arg else 7
+            days = max(1, min(days, 365))
+        except ValueError:
+            self.notifier.send_direct(
+                chat_id, "Uso: /stats &lt;giorni&gt;. Esempio: /stats 30"
+            )
+            return
+        since = int(time.time()) - days * 86400
+        rows = self.storage.stats_since(since)
+        if not rows:
+            self.notifier.send_direct(
+                chat_id, f"Nessun volo registrato negli ultimi {days} giorni."
+            )
+            return
+        name_by_icao = {h.icao24: h.display_name for h in self.helicopters}
+        lines = [f"📊 <b>Statistiche ultimi {days} giorni</b>"]
+        total_flights = 0
+        total_duration = 0
+        total_dist = 0.0
+        for r in rows:
+            name = name_by_icao.get(r["helicopter_key"], r["helicopter_key"])
+            total_flights += r["n_flights"]
+            total_duration += r["total_duration_s"]
+            total_dist += r["total_distance_km"]
+            lines.append(
+                f"• <b>{name}</b>: {r['n_flights']} voli, "
+                f"{format_duration(r['total_duration_s'])}, "
+                f"{r['total_distance_km']:.0f} km"
+            )
+        lines.append("")
+        lines.append(
+            f"<i>Totale: {total_flights} voli, "
+            f"{format_duration(total_duration)}, {total_dist:.0f} km</i>"
+        )
+        self.notifier.send_direct(chat_id, "\n".join(lines))
+
+    def cmd_last(self, chat_id: int) -> None:
+        rows = self.storage.last_flights_per_heli()
+        if not rows:
+            self.notifier.send_direct(
+                chat_id, "Nessun volo ancora registrato."
+            )
+            return
+        name_by_icao = {h.icao24: h.display_name for h in self.helicopters}
+        lines = ["🕘 <b>Ultimo volo per mezzo</b>"]
+        for r in rows:
+            name = name_by_icao.get(r["helicopter_key"], r["helicopter_key"])
+            ts = datetime.fromtimestamp(r["takeoff_ts"], tz=timezone.utc)
+            when = ts.strftime("%d/%m %H:%M UTC")
+            bits = [f"• <b>{name}</b> — {when}"]
+            details = []
+            if r["duration_s"]:
+                details.append(format_duration(r["duration_s"]))
+            if r["distance_km"]:
+                details.append(f"{r['distance_km']:.0f} km")
+            if r["landing_site"]:
+                details.append(f"→ {r['landing_site']}")
+            if details:
+                bits.append("  " + " · ".join(details))
+            lines.append("\n".join(bits))
+        self.notifier.send_direct(chat_id, "\n".join(lines))
+
+    # --- geofences -----------------------------------------------------------
+
+    def cmd_zone_add(self, chat_id: int, arg: str) -> None:
+        parts = arg.split()
+        if len(parts) != 4:
+            self.notifier.send_direct(
+                chat_id,
+                "Uso: <code>/zone_add &lt;nome&gt; &lt;lat&gt; &lt;lon&gt; &lt;raggio_km&gt;</code>\n"
+                "Esempio: <code>/zone_add Udine 46.0770 13.2400 15</code>",
+            )
+            return
+        name, lat_s, lon_s, r_s = parts
+        try:
+            lat = float(lat_s)
+            lon = float(lon_s)
+            radius = float(r_s)
+        except ValueError:
+            self.notifier.send_direct(
+                chat_id, "lat/lon/raggio devono essere numeri."
+            )
+            return
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180 and 0 < radius <= 500):
+            self.notifier.send_direct(
+                chat_id,
+                "Coordinate non valide o raggio fuori range (0 < raggio ≤ 500 km).",
+            )
+            return
+        self.storage.add_subscriber(chat_id)
+        ok = self.storage.add_geofence(chat_id, name, lat, lon, radius)
+        if ok:
+            self.notifier.send_direct(
+                chat_id,
+                f"✓ Zona <b>{name}</b> aggiunta ({lat:.4f}, {lon:.4f}, raggio {radius:g} km).",
+            )
+        else:
+            self.notifier.send_direct(
+                chat_id,
+                f"Esiste già una zona chiamata <b>{name}</b>. Usa /zone_del prima.",
+            )
+
+    def cmd_zone_list(self, chat_id: int) -> None:
+        zones = self.storage.geofences_of(chat_id)
+        if not zones:
+            self.notifier.send_direct(
+                chat_id,
+                "Nessuna zona definita. Aggiungi con /zone_add.",
+            )
+            return
+        lines = ["📍 <b>Le tue zone:</b>"]
+        for z in zones:
+            lines.append(
+                f"• <b>{z['name']}</b> — {z['lat']:.4f}, {z['lon']:.4f} "
+                f"(raggio {z['radius_km']:g} km)"
+            )
+        self.notifier.send_direct(chat_id, "\n".join(lines))
+
+    def cmd_zone_del(self, chat_id: int, arg: str) -> None:
+        name = arg.strip()
+        if not name:
+            self.notifier.send_direct(chat_id, "Uso: /zone_del &lt;nome&gt;")
+            return
+        ok = self.storage.remove_geofence(chat_id, name)
+        if ok:
+            self.notifier.send_direct(chat_id, f"✓ Zona <b>{name}</b> rimossa.")
+        else:
+            self.notifier.send_direct(chat_id, f"Nessuna zona trovata con nome <b>{name}</b>.")
 
 
 # ---------------------------------------------------------------------------

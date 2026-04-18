@@ -28,7 +28,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from detector import (
-    OpenSkyClient,
+    AdsbClient,
     load_helicopters,
     load_landing_sites,
     process_update,
@@ -102,8 +102,8 @@ def main() -> int:
 
     storage = Storage(cfg.db_path)
 
-    opensky = OpenSkyClient(cfg.opensky_user, cfg.opensky_pass)
-    resolve_missing_icao24(helis, opensky)
+    adsb = AdsbClient(cfg.opensky_user, cfg.opensky_pass, enable_fallback=True)
+    resolve_missing_icao24(helis, adsb)
 
     tracked = [h for h in helis if h.icao24]
     if not tracked:
@@ -132,6 +132,11 @@ def main() -> int:
             {"command": "list", "description": "Mostra le tue iscrizioni"},
             {"command": "all", "description": "Iscriviti a tutti i mezzi"},
             {"command": "none", "description": "Rimuovi tutte le iscrizioni"},
+            {"command": "stats", "description": "Statistiche voli (default 7 giorni)"},
+            {"command": "last", "description": "Ultimo volo per ogni mezzo"},
+            {"command": "zone_add", "description": "Aggiungi una zona (nome lat lon km)"},
+            {"command": "zone_list", "description": "Elenca le tue zone"},
+            {"command": "zone_del", "description": "Rimuovi una zona per nome"},
             {"command": "stop", "description": "Cancellati dal bot"},
             {"command": "help", "description": "Guida ai comandi"},
         ]
@@ -162,11 +167,32 @@ def main() -> int:
     icao_list = [h.icao24 for h in tracked]
     by_icao = {h.icao24: h for h in tracked}
 
+    # Alert sui fallimenti consecutivi di OpenSky: prima notifica dopo 10 cicli,
+    # poi ogni 50 per evitare flood. Il fallback adsb.lol copre intanto i dati.
+    ALERT_FIRST = 10
+    ALERT_EVERY = 50
+
     while not stop["flag"]:
         start = time.time()
-        states = opensky.fetch_states(icao_list)
+        states = adsb.fetch_states(icao_list)
+
+        fails = adsb.consecutive_opensky_failures
+        if cfg.admin_chat_id is not None and fails >= ALERT_FIRST:
+            should_alert = (
+                fails == ALERT_FIRST
+                or (fails - ALERT_FIRST) % ALERT_EVERY == 0
+            )
+            if should_alert and fails != adsb.last_failure_alerted:
+                adsb.last_failure_alerted = fails
+                mins = int(fails * cfg.poll_interval / 60)
+                notifier.send_direct(
+                    cfg.admin_chat_id,
+                    f"⚠️ OpenSky unresponsive: {fails} poll falliti "
+                    f"(~{mins} min). Fallback adsb.lol in uso.",
+                )
+
         for icao, h in by_icao.items():
-            process_update(h, states.get(icao), notifier, sites)
+            process_update(h, states.get(icao), notifier, sites, storage)
 
         elapsed = time.time() - start
         sleep_for = max(1.0, cfg.poll_interval - elapsed)

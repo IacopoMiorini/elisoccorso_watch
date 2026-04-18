@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import logging
 import math
+import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -24,6 +25,12 @@ import yaml
 log = logging.getLogger("heli-tracker.detector")
 
 OPENSKY_BASE = "https://opensky-network.org/api"
+ADSBLOL_BASE = "https://api.adsb.lol/v2"
+
+# Conversioni unità adsb.lol → internal (OpenSky-compatible)
+# adsb.lol riporta altitudini in feet e velocità al suolo (gs) in knots.
+FT_TO_M = 0.3048
+KT_TO_MS = 0.514444
 
 # Soglia di velocità al suolo (m/s) oltre la quale consideriamo il movimento "vero"
 # e non rumore dei dati ADS-B sul piazzale. ~10 m/s ≈ 20 nodi.
@@ -66,6 +73,8 @@ class Helicopter:
     flight_max_altitude_m: float | None = None
     flight_max_velocity_ms: float | None = None
     flight_distance_km: float = 0.0
+    flight_track: list[tuple[float, float]] = field(default_factory=list)
+    flight_callsign: str | None = None
 
     @property
     def display_name(self) -> str:
@@ -86,7 +95,20 @@ class LandingSite:
 
 
 class Notifier(Protocol):
-    def broadcast(self, text: str, helicopter_key: str) -> None: ...
+    def broadcast_event(
+        self,
+        text: str,
+        helicopter_key: str,
+        position: tuple[float, float] | None = None,
+        photo_path: Path | None = None,
+    ) -> None: ...
+
+    def send_direct(
+        self,
+        chat_id: int | str,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> Any: ...
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +117,10 @@ class Notifier(Protocol):
 
 
 class OpenSkyClient:
+    """Client OpenSky. fetch_states solleva AdsbFetchError sui fallimenti di
+    rete/HTTP, non su risposte vuote (che sono valide: semplicemente nessun
+    mezzo visto). Così il client fallback può capire quando prendere il posto."""
+
     def __init__(self, username: str | None, password: str | None):
         self.auth = (username, password) if username and password else None
         self.session = requests.Session()
@@ -117,18 +143,13 @@ class OpenSkyClient:
         if not icao24_list:
             return {}
         params = [("icao24", i) for i in icao24_list]
-        try:
-            r = self.session.get(
-                f"{OPENSKY_BASE}/states/all",
-                params=params,
-                auth=self.auth,
-                timeout=20,
-            )
-            r.raise_for_status()
-        except requests.RequestException as e:
-            log.warning("OpenSky /states/all fallito: %s", e)
-            return {}
-
+        r = self.session.get(
+            f"{OPENSKY_BASE}/states/all",
+            params=params,
+            auth=self.auth,
+            timeout=20,
+        )
+        r.raise_for_status()
         data = r.json()
         states = data.get("states") or []
         result: dict[str, dict[str, Any]] = {}
@@ -149,7 +170,120 @@ class OpenSkyClient:
                 "heading_deg": s[10],
                 "vertical_rate_ms": s[11],
                 "geo_altitude_m": s[13],
+                "source": "opensky",
             }
+        return result
+
+
+class AdsbLolClient:
+    """Client adsb.lol (fallback gratuito no-auth).
+
+    Documentazione: https://api.adsb.lol/docs
+    L'endpoint /v2/hex/<hex>[,<hex>...] accetta fino a ~50 hex comma-separated
+    e torna gli state vector in un JSON dal formato readsb.
+    """
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": "heli-tracker-bot/1.0"})
+
+    def fetch_states(self, icao24_list: list[str]) -> dict[str, dict[str, Any]]:
+        if not icao24_list:
+            return {}
+        joined = ",".join(icao24_list)
+        r = self.session.get(f"{ADSBLOL_BASE}/hex/{joined}", timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        aircraft = data.get("ac") or []
+        result: dict[str, dict[str, Any]] = {}
+        for a in aircraft:
+            icao = (a.get("hex") or "").strip().lower()
+            if not icao:
+                continue
+            alt_baro = a.get("alt_baro")
+            alt_geom = a.get("alt_geom")
+            gs_kt = a.get("gs")
+            # adsb.lol riporta `alt_baro` come "ground" (string) quando a terra.
+            on_ground = isinstance(alt_baro, str) and alt_baro.lower() == "ground"
+            baro_m = (
+                alt_baro * FT_TO_M if isinstance(alt_baro, (int, float)) else None
+            )
+            geo_m = alt_geom * FT_TO_M if isinstance(alt_geom, (int, float)) else None
+            vel_ms = gs_kt * KT_TO_MS if isinstance(gs_kt, (int, float)) else None
+            result[icao] = {
+                "callsign": (a.get("flight") or "").strip(),
+                "origin_country": None,
+                "time_position": a.get("seen_pos"),
+                "last_contact": a.get("seen"),
+                "longitude": a.get("lon"),
+                "latitude": a.get("lat"),
+                "baro_altitude_m": baro_m,
+                "on_ground": on_ground,
+                "velocity_ms": vel_ms,
+                "heading_deg": a.get("track"),
+                "vertical_rate_ms": (
+                    a.get("baro_rate") * FT_TO_M / 60.0
+                    if isinstance(a.get("baro_rate"), (int, float))
+                    else None
+                ),
+                "geo_altitude_m": geo_m,
+                "source": "adsblol",
+            }
+        return result
+
+
+class AdsbClient:
+    """Wrapper con fallback: prova OpenSky, poi adsb.lol per gli ICAO mancanti.
+
+    Traccia i fallimenti consecutivi della primary (OpenSky) per permettere al
+    chiamante di allertare dopo N cicli falliti.
+    """
+
+    def __init__(
+        self,
+        opensky_user: str | None,
+        opensky_pass: str | None,
+        enable_fallback: bool = True,
+    ):
+        self.primary = OpenSkyClient(opensky_user, opensky_pass)
+        self.fallback = AdsbLolClient() if enable_fallback else None
+        self.consecutive_opensky_failures = 0
+        self.last_failure_alerted = 0  # quante failure avevamo all'ultima notifica
+
+    def resolve_icao24(self, registration: str) -> str | None:
+        return self.primary.resolve_icao24(registration)
+
+    def fetch_states(self, icao24_list: list[str]) -> dict[str, dict[str, Any]]:
+        try:
+            result = self.primary.fetch_states(icao24_list)
+            self.consecutive_opensky_failures = 0
+            self.last_failure_alerted = 0
+        except requests.RequestException as e:
+            self.consecutive_opensky_failures += 1
+            log.warning(
+                "OpenSky fetch_states fallito (#%d): %s",
+                self.consecutive_opensky_failures,
+                e,
+            )
+            result = {}
+
+        if not self.fallback:
+            return result
+
+        missing = [i for i in icao24_list if i not in result]
+        if not missing:
+            return result
+        try:
+            fb = self.fallback.fetch_states(missing)
+            if fb:
+                log.info(
+                    "adsb.lol ha recuperato %d mezzi non visti da OpenSky: %s",
+                    len(fb),
+                    list(fb.keys()),
+                )
+            result.update(fb)
+        except requests.RequestException as e:
+            log.warning("adsb.lol fallback fallito: %s", e)
         return result
 
 
@@ -325,7 +459,7 @@ def load_landing_sites(path: Path) -> list[LandingSite]:
 
 
 def resolve_missing_icao24(
-    helis: list[Helicopter], client: OpenSkyClient
+    helis: list[Helicopter], client: "AdsbClient | OpenSkyClient"
 ) -> None:
     for h in helis:
         if h.icao24 or not h.registration:
@@ -343,8 +477,100 @@ def resolve_missing_icao24(
 
 
 # ---------------------------------------------------------------------------
+# Rendering traccia di volo (PNG)
+# ---------------------------------------------------------------------------
+
+
+def render_track_png(
+    waypoints: list[tuple[float, float]],
+    width: int = 800,
+    height: int = 500,
+) -> Path | None:
+    """Genera un PNG temporaneo con la rotta del volo sovrapposta a OSM.
+
+    Ritorna il Path del file o None se il rendering non è possibile (pochi
+    waypoint o libreria non installata o errore di download tiles).
+    Il file è temporaneo: il chiamante deve cancellarlo dopo l'invio.
+    """
+    if len(waypoints) < 2:
+        return None
+    try:
+        from staticmap import CircleMarker, Line, StaticMap
+    except ImportError:
+        log.info("staticmap non installato: skip rendering traccia.")
+        return None
+
+    try:
+        m = StaticMap(width, height, padding_x=40, padding_y=40)
+        # staticmap vuole (lon, lat)
+        coords = [(lon, lat) for lat, lon in waypoints]
+        m.add_line(Line(coords, "#d62828", 3))
+        m.add_marker(CircleMarker(coords[0], "#2a9d8f", 12))   # verde = decollo
+        m.add_marker(CircleMarker(coords[-1], "#d62828", 12))  # rosso = atterraggio
+        img = m.render()
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp.close()
+        out = Path(tmp.name)
+        img.save(out)
+        return out
+    except Exception as e:
+        log.warning("Rendering traccia fallito: %s", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Core: process_update
 # ---------------------------------------------------------------------------
+
+
+def _landed_position(
+    h: Helicopter, state: dict[str, Any] | None
+) -> tuple[float, float] | None:
+    if state is not None:
+        lat = state.get("latitude")
+        lon = state.get("longitude")
+        if lat is not None and lon is not None:
+            return (lat, lon)
+    return h.last_position
+
+
+def _emit_landing(
+    h: Helicopter,
+    state: dict[str, Any] | None,
+    sites: list[LandingSite],
+    notifier: Notifier,
+    storage: Any | None,
+) -> None:
+    """Formatta landing message, renderizza traccia, broadcasta, registra nel DB."""
+    text = format_landing(h, state, sites)
+    pos = _landed_position(h, state)
+    png_path = render_track_png(h.flight_track) if h.flight_track else None
+    notifier.broadcast_event(
+        text=text, helicopter_key=h.icao24, position=pos, photo_path=png_path
+    )
+    if png_path is not None:
+        try:
+            png_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if storage is not None and h.flight_start_ts is not None:
+        site = find_landing_site(*pos, sites) if pos else None
+        try:
+            storage.record_flight(
+                helicopter_key=h.icao24,
+                takeoff_ts=int(h.flight_start_ts),
+                landing_ts=int(time.time()),
+                distance_km=h.flight_distance_km or None,
+                max_altitude_m=h.flight_max_altitude_m,
+                max_velocity_ms=h.flight_max_velocity_ms,
+                takeoff_position=h.flight_start_position,
+                landing_position=pos,
+                landing_site=site.name if site else None,
+                callsign=h.flight_callsign,
+            )
+        except Exception:
+            log.exception("Errore salvando il volo di %s", h.display_name)
 
 
 def process_update(
@@ -352,8 +578,12 @@ def process_update(
     state: dict[str, Any] | None,
     notifier: Notifier,
     sites: list[LandingSite],
+    storage: Any | None = None,
 ) -> None:
-    """Aggiorna lo stato di un elicottero e invia notifiche quando serve."""
+    """Aggiorna lo stato di un elicottero e invia notifiche quando serve.
+
+    `storage`: se fornito, registra ogni volo completato in `flights`.
+    """
     if state is None:
         if h.in_flight:
             h.missing_cycles += 1
@@ -363,10 +593,12 @@ def process_update(
                     h.display_name,
                     h.missing_cycles,
                 )
-                notifier.broadcast(format_landing(h, None, sites), h.icao24)
+                _emit_landing(h, None, sites, notifier, storage)
                 h.in_flight = False
                 h.last_on_ground = True
                 h.missing_cycles = 0
+                h.flight_track = []
+                h.flight_callsign = None
         return
 
     h.missing_cycles = 0
@@ -378,8 +610,6 @@ def process_update(
     lon = state.get("longitude")
     alt = state.get("geo_altitude_m") or state.get("baro_altitude_m")
 
-    # Cattura la posizione precedente PRIMA della sovrascrittura per misurare i
-    # segmenti di distanza.
     prev_position = h.last_position
 
     if lat is not None and lon is not None:
@@ -407,7 +637,16 @@ def process_update(
         h.flight_max_altitude_m = alt
         h.flight_max_velocity_ms = vel
         h.flight_distance_km = 0.0
-        notifier.broadcast(format_takeoff(h, state), h.icao24)
+        h.flight_track = (
+            [(lat, lon)] if lat is not None and lon is not None else []
+        )
+        h.flight_callsign = (state.get("callsign") or "").strip() or None
+        pos = (lat, lon) if lat is not None and lon is not None else None
+        notifier.broadcast_event(
+            text=format_takeoff(h, state),
+            helicopter_key=h.icao24,
+            position=pos,
+        )
         h.in_flight = True
     elif h.in_flight and not on_ground:
         if alt is not None:
@@ -416,14 +655,20 @@ def process_update(
             h.flight_max_velocity_ms = max(h.flight_max_velocity_ms or vel, vel)
         if prev_position is not None and lat is not None and lon is not None:
             segment = haversine_km(prev_position[0], prev_position[1], lat, lon)
-            # Filtra outlier: >500 km in un singolo poll è un errore di geoloc.
-            if segment < 500:
+            if segment < 500:  # filtra outlier di geolocalizzazione
                 h.flight_distance_km += segment
+        if lat is not None and lon is not None:
+            h.flight_track.append((lat, lon))
+        cs = (state.get("callsign") or "").strip()
+        if cs and not h.flight_callsign:
+            h.flight_callsign = cs
 
     if on_ground and h.in_flight:
         log.info("%s: ATTERRAGGIO rilevato", h.display_name)
-        notifier.broadcast(format_landing(h, state, sites), h.icao24)
+        _emit_landing(h, state, sites, notifier, storage)
         h.in_flight = False
+        h.flight_track = []
+        h.flight_callsign = None
 
     h.last_on_ground = on_ground
 

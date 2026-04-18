@@ -41,8 +41,40 @@ CREATE TABLE IF NOT EXISTS bot_state (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS flights (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    helicopter_key  TEXT    NOT NULL,
+    takeoff_ts      INTEGER NOT NULL,
+    landing_ts      INTEGER,
+    duration_s      INTEGER,
+    distance_km     REAL,
+    max_altitude_m  INTEGER,
+    max_velocity_ms REAL,
+    takeoff_lat     REAL,
+    takeoff_lon     REAL,
+    landing_lat     REAL,
+    landing_lon     REAL,
+    landing_site    TEXT,
+    callsign        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS geofences (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id   INTEGER NOT NULL,
+    name      TEXT    NOT NULL,
+    lat       REAL    NOT NULL,
+    lon       REAL    NOT NULL,
+    radius_km REAL    NOT NULL,
+    UNIQUE (chat_id, name),
+    FOREIGN KEY (chat_id) REFERENCES subscribers(chat_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_subscriptions_heli
     ON subscriptions(helicopter_key);
+CREATE INDEX IF NOT EXISTS idx_flights_heli_ts
+    ON flights(helicopter_key, takeoff_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_geofences_chat
+    ON geofences(chat_id);
 """
 
 
@@ -164,6 +196,151 @@ class Storage:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+
+    # --- flights (storico voli) ----------------------------------------------
+
+    def record_flight(
+        self,
+        helicopter_key: str,
+        takeoff_ts: int,
+        landing_ts: int,
+        distance_km: float | None = None,
+        max_altitude_m: float | None = None,
+        max_velocity_ms: float | None = None,
+        takeoff_position: tuple[float, float] | None = None,
+        landing_position: tuple[float, float] | None = None,
+        landing_site: str | None = None,
+        callsign: str | None = None,
+    ) -> int:
+        """Registra un volo completato. Ritorna l'id generato."""
+        duration = max(0, int(landing_ts - takeoff_ts))
+        t_lat, t_lon = takeoff_position if takeoff_position else (None, None)
+        l_lat, l_lon = landing_position if landing_position else (None, None)
+        with self._tx() as c:
+            cur = c.execute(
+                """
+                INSERT INTO flights (
+                    helicopter_key, takeoff_ts, landing_ts, duration_s,
+                    distance_km, max_altitude_m, max_velocity_ms,
+                    takeoff_lat, takeoff_lon, landing_lat, landing_lon,
+                    landing_site, callsign
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    helicopter_key,
+                    int(takeoff_ts),
+                    int(landing_ts),
+                    duration,
+                    float(distance_km) if distance_km is not None else None,
+                    int(max_altitude_m) if max_altitude_m is not None else None,
+                    float(max_velocity_ms) if max_velocity_ms is not None else None,
+                    t_lat,
+                    t_lon,
+                    l_lat,
+                    l_lon,
+                    landing_site,
+                    callsign,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def stats_since(self, since_ts: int) -> list[dict]:
+        """Aggregato per mezzo degli ultimi voli: count, durata, distanza."""
+        rows = self._conn.execute(
+            """
+            SELECT helicopter_key,
+                   COUNT(*)               AS n_flights,
+                   SUM(duration_s)        AS total_duration_s,
+                   SUM(distance_km)       AS total_distance_km,
+                   MAX(takeoff_ts)        AS last_takeoff_ts
+            FROM flights
+            WHERE takeoff_ts >= ?
+            GROUP BY helicopter_key
+            ORDER BY n_flights DESC
+            """,
+            (int(since_ts),),
+        ).fetchall()
+        return [
+            {
+                "helicopter_key": r[0],
+                "n_flights": int(r[1] or 0),
+                "total_duration_s": int(r[2] or 0),
+                "total_distance_km": float(r[3] or 0.0),
+                "last_takeoff_ts": int(r[4] or 0),
+            }
+            for r in rows
+        ]
+
+    def last_flights_per_heli(self) -> list[dict]:
+        """Ultimo volo registrato per ciascun mezzo."""
+        rows = self._conn.execute(
+            """
+            SELECT f.helicopter_key, f.takeoff_ts, f.landing_ts, f.duration_s,
+                   f.distance_km, f.max_altitude_m, f.landing_site, f.callsign
+            FROM flights f
+            INNER JOIN (
+                SELECT helicopter_key, MAX(takeoff_ts) AS max_ts
+                FROM flights
+                GROUP BY helicopter_key
+            ) m ON f.helicopter_key = m.helicopter_key
+               AND f.takeoff_ts = m.max_ts
+            ORDER BY f.takeoff_ts DESC
+            """
+        ).fetchall()
+        return [
+            {
+                "helicopter_key": r[0],
+                "takeoff_ts": int(r[1]),
+                "landing_ts": int(r[2]) if r[2] else None,
+                "duration_s": int(r[3]) if r[3] else None,
+                "distance_km": float(r[4]) if r[4] else None,
+                "max_altitude_m": int(r[5]) if r[5] else None,
+                "landing_site": r[6],
+                "callsign": r[7],
+            }
+            for r in rows
+        ]
+
+    # --- geofences -----------------------------------------------------------
+
+    def add_geofence(
+        self,
+        chat_id: int,
+        name: str,
+        lat: float,
+        lon: float,
+        radius_km: float,
+    ) -> bool:
+        """Inserisce una zona. Ritorna False se esiste già col nome dato per l'utente."""
+        with self._tx() as c:
+            try:
+                c.execute(
+                    "INSERT INTO geofences (chat_id, name, lat, lon, radius_km) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (chat_id, name, float(lat), float(lon), float(radius_km)),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def remove_geofence(self, chat_id: int, name: str) -> bool:
+        with self._tx() as c:
+            cur = c.execute(
+                "DELETE FROM geofences WHERE chat_id = ? AND name = ?",
+                (chat_id, name),
+            )
+            return cur.rowcount > 0
+
+    def geofences_of(self, chat_id: int) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT name, lat, lon, radius_km FROM geofences WHERE chat_id = ? "
+            "ORDER BY name",
+            (chat_id,),
+        ).fetchall()
+        return [
+            {"name": r[0], "lat": float(r[1]), "lon": float(r[2]), "radius_km": float(r[3])}
+            for r in rows
+        ]
 
     # --- lifecycle -----------------------------------------------------------
 
