@@ -6,10 +6,10 @@ RUN useradd --create-home --shell /bin/bash app
 WORKDIR /app
 
 # Installa deps prima del codice per sfruttare la cache
-COPY requirements.txt ./
+COPY --chmod=0644 requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py helicopters.yaml ./
+COPY --chmod=0644 main.py helicopters.yaml ./
 
 # File di config personalizzati si possono montare sovrascrivendo helicopters.yaml
 # oppure puntare HELICOPTERS_FILE a un volume.
