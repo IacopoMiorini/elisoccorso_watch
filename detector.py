@@ -119,13 +119,32 @@ class Notifier(Protocol):
 
 
 class OpenSkyClient:
-    """Client OpenSky. fetch_states solleva AdsbFetchError sui fallimenti di
-    rete/HTTP, non su risposte vuote (che sono valide: semplicemente nessun
-    mezzo visto). Così il client fallback può capire quando prendere il posto."""
+    """Client OpenSky. fetch_states solleva HTTPError sui fallimenti HTTP
+    (incluso 429), non su risposte vuote (che sono valide: semplicemente nessun
+    mezzo visto). Rispetta l'header `Retry-After` sul 429 mettendosi in
+    back-off fino allo scadere del tempo indicato, così non prolunga il
+    rate-limit su OpenSky battendogli addosso."""
 
     def __init__(self, username: str | None, password: str | None):
         self.auth = (username, password) if username and password else None
         self.session = requests.Session()
+        self.back_off_until = 0.0
+
+    @property
+    def is_backing_off(self) -> bool:
+        return time.time() < self.back_off_until
+
+    @staticmethod
+    def _parse_retry_after(response: requests.Response) -> int:
+        """Ritorna secondi di back-off da rispettare. Clamp fra 5 e 900s.
+        Se l'header è HTTP-date o assente, usa 60s conservativi."""
+        h = response.headers.get("Retry-After")
+        if not h:
+            return 60
+        try:
+            return max(5, min(900, int(h)))
+        except ValueError:
+            return 60
 
     def resolve_icao24(self, registration: str) -> str | None:
         url = f"{OPENSKY_BASE}/metadata/aircraft/registration/{registration}"
@@ -151,6 +170,15 @@ class OpenSkyClient:
             auth=self.auth,
             timeout=20,
         )
+        if r.status_code == 429:
+            retry = self._parse_retry_after(r)
+            self.back_off_until = time.time() + retry
+            log.warning(
+                "OpenSky 429: back-off per %ds (fino a %s)",
+                retry,
+                datetime.fromtimestamp(self.back_off_until, tz=timezone.utc)
+                .strftime("%H:%M:%S UTC"),
+            )
         r.raise_for_status()
         data = r.json()
         states = data.get("states") or []
@@ -256,18 +284,23 @@ class AdsbClient:
         return self.primary.resolve_icao24(registration)
 
     def fetch_states(self, icao24_list: list[str]) -> dict[str, dict[str, Any]]:
-        try:
-            result = self.primary.fetch_states(icao24_list)
-            self.consecutive_opensky_failures = 0
-            self.last_failure_alerted = 0
-        except requests.RequestException as e:
-            self.consecutive_opensky_failures += 1
-            log.warning(
-                "OpenSky fetch_states fallito (#%d): %s",
-                self.consecutive_opensky_failures,
-                e,
-            )
-            result = {}
+        if self.primary.is_backing_off:
+            # Non chiamiamo OpenSky finché siamo nel back-off richiesto dal
+            # server. Il fallback adsb.lol copre intanto.
+            result: dict[str, dict[str, Any]] = {}
+        else:
+            try:
+                result = self.primary.fetch_states(icao24_list)
+                self.consecutive_opensky_failures = 0
+                self.last_failure_alerted = 0
+            except requests.RequestException as e:
+                self.consecutive_opensky_failures += 1
+                log.warning(
+                    "OpenSky fetch_states fallito (#%d): %s",
+                    self.consecutive_opensky_failures,
+                    e,
+                )
+                result = {}
 
         if not self.fallback:
             return result
