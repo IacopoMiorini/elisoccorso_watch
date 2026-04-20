@@ -101,6 +101,7 @@ class Notifier(Protocol):
         self,
         text: str,
         helicopter_key: str,
+        position: tuple[float, float] | None = None,
         photo_path: Path | None = None,
     ) -> None: ...
 
@@ -610,7 +611,7 @@ def _emit_landing(
 
     png_path = render_track_png(h.flight_track) if h.flight_track else None
     notifier.broadcast_event(
-        text=text, helicopter_key=h.icao24, photo_path=png_path
+        text=text, helicopter_key=h.icao24, position=pos, photo_path=png_path
     )
     if png_path is not None:
         try:
@@ -707,9 +708,11 @@ def process_update(
             [(lat, lon)] if lat is not None and lon is not None else []
         )
         h.flight_callsign = (state.get("callsign") or "").strip() or None
+        takeoff_pos = (lat, lon) if lat is not None and lon is not None else None
         notifier.broadcast_event(
             text=format_takeoff(h, state),
             helicopter_key=h.icao24,
+            position=takeoff_pos,
         )
         h.in_flight = True
     elif h.in_flight and not on_ground:

@@ -134,6 +134,9 @@ def main() -> int:
             {"command": "none", "description": "Rimuovi tutte le iscrizioni"},
             {"command": "stats", "description": "Statistiche voli (default 7 giorni)"},
             {"command": "last", "description": "Ultimo volo per ogni mezzo"},
+            {"command": "zone_add", "description": "Aggiungi zona (nome lat lon raggio_km)"},
+            {"command": "zone_list", "description": "Elenca le tue zone"},
+            {"command": "zone_del", "description": "Rimuovi una zona per nome"},
             {"command": "stop", "description": "Cancellati dal bot"},
             {"command": "help", "description": "Guida ai comandi"},
         ]
