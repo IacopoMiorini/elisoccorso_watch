@@ -136,15 +136,25 @@ class OpenSkyClient:
 
     @staticmethod
     def _parse_retry_after(response: requests.Response) -> int:
-        """Ritorna secondi di back-off da rispettare. Clamp fra 5 e 900s.
-        Se l'header è HTTP-date o assente, usa 60s conservativi."""
-        h = response.headers.get("Retry-After")
-        if not h:
-            return 60
-        try:
-            return max(5, min(900, int(h)))
-        except ValueError:
-            return 60
+        """Ritorna secondi di back-off da rispettare. Clamp fra 5s e 24h.
+
+        OpenSky usa un header custom `X-Rate-Limit-Retry-After-Seconds` che
+        contiene il tempo residuo fino al reset del quota giornaliero (può
+        essere anche ~11h). Proviamo quello per primo, poi il `Retry-After`
+        standard; fallback 60s se entrambi assenti o malformati.
+        """
+        candidates = [
+            response.headers.get("X-Rate-Limit-Retry-After-Seconds"),
+            response.headers.get("Retry-After"),
+        ]
+        for h in candidates:
+            if not h:
+                continue
+            try:
+                return max(5, min(86400, int(h)))
+            except ValueError:
+                continue
+        return 60
 
     def resolve_icao24(self, registration: str) -> str | None:
         url = f"{OPENSKY_BASE}/metadata/aircraft/registration/{registration}"
