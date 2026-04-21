@@ -32,9 +32,12 @@ ADSBLOL_BASE = "https://api.adsb.lol/v2"
 FT_TO_M = 0.3048
 KT_TO_MS = 0.514444
 
-# Soglia di velocità al suolo (m/s) oltre la quale consideriamo il movimento "vero"
-# e non rumore dei dati ADS-B sul piazzale. ~10 m/s ≈ 20 nodi.
-TAKEOFF_MIN_VELOCITY_MS = 10.0
+# Numero di osservazioni consecutive con on_ground=False richieste per dichiarare
+# decollo quando non abbiamo mai visto il mezzo a terra (o il primo sample post-
+# liftoff cattura hover/climb a bassa ground-speed). Filtra flicker del bit
+# Mode-S sul piazzale senza perdere i decolli di elicotteri in hover prolungato.
+# Con POLL_INTERVAL=45s sono ~90s: ritardo accettabile, zero falsi negativi.
+AIRBORNE_CYCLES_FOR_TAKEOFF = 2
 
 # Numero di poll consecutivi senza contatto prima di dichiarare un "landing inferito"
 # (segnale perso). Con POLL_INTERVAL=45s sono ~6 minuti — abbastanza per tollerare
@@ -63,6 +66,7 @@ class Helicopter:
     last_on_ground: bool | None = None
     last_seen_ts: float = 0.0
     missing_cycles: int = 0
+    airborne_pending_cycles: int = 0
     in_flight: bool = False
     last_position: tuple[float, float] | None = None  # (lat, lon)
     last_heading: float | None = None
@@ -707,6 +711,7 @@ def process_update(
                 h.in_flight = False
                 h.last_on_ground = True
                 h.missing_cycles = 0
+                h.airborne_pending_cycles = 0
                 h.flight_track = []
                 h.flight_callsign = None
         return
@@ -730,13 +735,26 @@ def process_update(
 
     prev_on_ground = h.last_on_ground
 
+    # Takeoff detection: si basa sul bit on_ground, NON sulla velocità. Gli
+    # elicotteri HEMS spesso restano in hover/low-speed per decine di secondi
+    # dopo il liftoff, e un gate sulla ground-speed perdeva i decolli ogni volta
+    # che il primo sample post-liftoff cadeva in quella finestra.
+    # Per filtrare il flicker del bit Mode-S sul piazzale richiediamo o una
+    # transizione pulita True→False, oppure N osservazioni consecutive in aria.
     is_takeoff = False
-    if not on_ground and vel >= TAKEOFF_MIN_VELOCITY_MS:
+    if not on_ground and not h.in_flight:
+        h.airborne_pending_cycles += 1
         if prev_on_ground is True:
             is_takeoff = True
-        elif prev_on_ground is None and not h.in_flight:
+        elif prev_on_ground is None:
             # Prima osservazione e già in volo: notifico come decollo "tardivo".
             is_takeoff = True
+        elif h.airborne_pending_cycles >= AIRBORNE_CYCLES_FOR_TAKEOFF:
+            # prev_on_ground=False da 1+ ciclo: confermo dopo N cicli in aria,
+            # nel caso abbiamo mancato la transizione pulita (hover a bassa vel).
+            is_takeoff = True
+    elif on_ground:
+        h.airborne_pending_cycles = 0
 
     if is_takeoff and not h.in_flight:
         log.info("%s: DECOLLO rilevato", h.display_name)
