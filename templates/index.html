@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% set active = 'flights' %}
+{% block title %}Voli — heli-tracker{% endblock %}
+
+{% block content %}
+<h2 style="margin-top:0">Ultimi voli</h2>
+{% if flights %}
+<table>
+  <thead>
+    <tr>
+      <th>Quando</th>
+      <th>Mezzo</th>
+      <th>Callsign</th>
+      <th>Durata</th>
+      <th>Distanza</th>
+      <th>Quota max</th>
+      <th>Atterrato</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for f in flights %}
+    <tr>
+      <td>{{ f.takeoff_iso or '—' }}</td>
+      <td><b>{{ f.display_name }}</b></td>
+      <td class="muted">{{ f.callsign or '—' }}</td>
+      <td>{% if f.duration_s %}{{ (f.duration_s // 60) }} min{% else %}—{% endif %}</td>
+      <td>{% if f.distance_km %}{{ '%.0f'|format(f.distance_km) }} km{% else %}—{% endif %}</td>
+      <td>{% if f.max_altitude_m %}{{ f.max_altitude_m }} m{% else %}—{% endif %}</td>
+      <td>{{ f.landing_site or '—' }}</td>
+      <td>
+        {% if f.inferred %}<span class="tag inferred">segnale perso</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">Nessun volo registrato ancora.</div>
+{% endif %}
+{% endblock %}

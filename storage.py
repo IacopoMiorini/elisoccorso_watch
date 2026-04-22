@@ -70,12 +70,37 @@ CREATE TABLE IF NOT EXISTS geofences (
     FOREIGN KEY (chat_id) REFERENCES subscribers(chat_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS current_states (
+    helicopter_key TEXT PRIMARY KEY,
+    lat            REAL,
+    lon            REAL,
+    altitude_m     INTEGER,
+    velocity_ms    REAL,
+    heading_deg    REAL,
+    on_ground      INTEGER,
+    in_flight      INTEGER NOT NULL DEFAULT 0,
+    callsign       TEXT,
+    source         TEXT,
+    updated_ts     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS flight_track_points (
+    flight_id INTEGER NOT NULL,
+    idx       INTEGER NOT NULL,
+    lat       REAL    NOT NULL,
+    lon       REAL    NOT NULL,
+    PRIMARY KEY (flight_id, idx),
+    FOREIGN KEY (flight_id) REFERENCES flights(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_subscriptions_heli
     ON subscriptions(helicopter_key);
 CREATE INDEX IF NOT EXISTS idx_flights_heli_ts
     ON flights(helicopter_key, takeoff_ts DESC);
 CREATE INDEX IF NOT EXISTS idx_geofences_chat
     ON geofences(chat_id);
+CREATE INDEX IF NOT EXISTS idx_flight_track_points_flight
+    ON flight_track_points(flight_id);
 """
 
 
@@ -365,6 +390,168 @@ class Storage:
                 "lat": float(r[1]),
                 "lon": float(r[2]),
                 "radius_km": float(r[3]),
+            }
+            for r in rows
+        ]
+
+    # --- current_states (stato live, per dashboard) --------------------------
+
+    def upsert_current_state(
+        self,
+        helicopter_key: str,
+        lat: float | None,
+        lon: float | None,
+        altitude_m: float | None,
+        velocity_ms: float | None,
+        heading_deg: float | None,
+        on_ground: bool | None,
+        in_flight: bool,
+        callsign: str | None,
+        source: str | None,
+    ) -> None:
+        with self._tx() as c:
+            c.execute(
+                """
+                INSERT INTO current_states (
+                    helicopter_key, lat, lon, altitude_m, velocity_ms, heading_deg,
+                    on_ground, in_flight, callsign, source, updated_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(helicopter_key) DO UPDATE SET
+                    lat=excluded.lat, lon=excluded.lon,
+                    altitude_m=excluded.altitude_m, velocity_ms=excluded.velocity_ms,
+                    heading_deg=excluded.heading_deg, on_ground=excluded.on_ground,
+                    in_flight=excluded.in_flight, callsign=excluded.callsign,
+                    source=excluded.source, updated_ts=excluded.updated_ts
+                """,
+                (
+                    helicopter_key,
+                    lat,
+                    lon,
+                    int(altitude_m) if altitude_m is not None else None,
+                    float(velocity_ms) if velocity_ms is not None else None,
+                    float(heading_deg) if heading_deg is not None else None,
+                    (1 if on_ground else 0) if on_ground is not None else None,
+                    1 if in_flight else 0,
+                    callsign,
+                    source,
+                    int(time.time()),
+                ),
+            )
+
+    def set_in_flight(self, helicopter_key: str, in_flight: bool) -> None:
+        """Aggiorna solo il flag in_flight (usato al landing inferito senza state)."""
+        with self._tx() as c:
+            c.execute(
+                "UPDATE current_states SET in_flight = ?, updated_ts = ? "
+                "WHERE helicopter_key = ?",
+                (1 if in_flight else 0, int(time.time()), helicopter_key),
+            )
+
+    def all_current_states(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT helicopter_key, lat, lon, altitude_m, velocity_ms, heading_deg, "
+            "       on_ground, in_flight, callsign, source, updated_ts "
+            "FROM current_states"
+        ).fetchall()
+        return [
+            {
+                "helicopter_key": r[0],
+                "lat": r[1],
+                "lon": r[2],
+                "altitude_m": r[3],
+                "velocity_ms": r[4],
+                "heading_deg": r[5],
+                "on_ground": bool(r[6]) if r[6] is not None else None,
+                "in_flight": bool(r[7]),
+                "callsign": r[8],
+                "source": r[9],
+                "updated_ts": int(r[10]),
+            }
+            for r in rows
+        ]
+
+    # --- flight_track_points (per render mappa) ------------------------------
+
+    def save_flight_track(
+        self,
+        flight_id: int,
+        waypoints: list[tuple[float, float]],
+    ) -> None:
+        if not waypoints or flight_id <= 0:
+            return
+        with self._tx() as c:
+            c.executemany(
+                "INSERT INTO flight_track_points (flight_id, idx, lat, lon) "
+                "VALUES (?, ?, ?, ?)",
+                [(flight_id, i, lat, lon) for i, (lat, lon) in enumerate(waypoints)],
+            )
+
+    def recent_flights_with_tracks(self, limit: int = 20) -> list[dict]:
+        """Ultimi N voli + lista waypoint. Usato dalla dashboard per mappare tracce."""
+        flight_rows = self._conn.execute(
+            """
+            SELECT id, helicopter_key, takeoff_ts, landing_ts, duration_s,
+                   distance_km, landing_site, callsign, inferred,
+                   takeoff_lat, takeoff_lon, landing_lat, landing_lon
+            FROM flights
+            ORDER BY takeoff_ts DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+        out: list[dict] = []
+        for f in flight_rows:
+            fid = int(f[0])
+            pts = self._conn.execute(
+                "SELECT lat, lon FROM flight_track_points "
+                "WHERE flight_id = ? ORDER BY idx",
+                (fid,),
+            ).fetchall()
+            out.append(
+                {
+                    "id": fid,
+                    "helicopter_key": f[1],
+                    "takeoff_ts": int(f[2]),
+                    "landing_ts": int(f[3]) if f[3] else None,
+                    "duration_s": int(f[4]) if f[4] else None,
+                    "distance_km": float(f[5]) if f[5] else None,
+                    "landing_site": f[6],
+                    "callsign": f[7],
+                    "inferred": bool(f[8]),
+                    "takeoff_lat": f[9],
+                    "takeoff_lon": f[10],
+                    "landing_lat": f[11],
+                    "landing_lon": f[12],
+                    "track": [{"lat": p[0], "lon": p[1]} for p in pts],
+                }
+            )
+        return out
+
+    def recent_flights(self, limit: int = 50) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT id, helicopter_key, takeoff_ts, landing_ts, duration_s,
+                   distance_km, max_altitude_m, max_velocity_ms,
+                   landing_site, callsign, inferred
+            FROM flights
+            ORDER BY takeoff_ts DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+        return [
+            {
+                "id": int(r[0]),
+                "helicopter_key": r[1],
+                "takeoff_ts": int(r[2]),
+                "landing_ts": int(r[3]) if r[3] else None,
+                "duration_s": int(r[4]) if r[4] else None,
+                "distance_km": float(r[5]) if r[5] else None,
+                "max_altitude_m": int(r[6]) if r[6] else None,
+                "max_velocity_ms": float(r[7]) if r[7] else None,
+                "landing_site": r[8],
+                "callsign": r[9],
+                "inferred": bool(r[10]),
             }
             for r in rows
         ]

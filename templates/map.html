@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% set active = 'map' %}
+{% block title %}Mappa — heli-tracker{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+{% endblock %}
+
+{% block extra_css %}
+main { padding: 0; }
+#map { height: calc(100vh - 50px); width: 100%; }
+.legend {
+  background: rgba(26,26,26,0.9);
+  color: #eee;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+.legend .swatch {
+  display: inline-block;
+  width: 12px; height: 12px;
+  border-radius: 2px;
+  vertical-align: middle;
+  margin-right: 4px;
+}
+.heli-popup { font-size: 0.9rem; }
+.heli-popup b { color: #111; }
+{% endblock %}
+
+{% block content %}
+<div id="map"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+(async () => {
+  const map = L.map('map').setView([46.0, 13.2], 8);  // FVG/Veneto nord centro
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap',
+    maxZoom: 19
+  }).addTo(map);
+
+  const legend = L.control({ position: 'bottomright' });
+  legend.onAdd = () => {
+    const div = L.DomUtil.create('div', 'legend');
+    div.innerHTML = `
+      <div><span class="swatch" style="background:#d62828"></span>In volo</div>
+      <div><span class="swatch" style="background:#2a9d8f"></span>Al suolo</div>
+      <div><span class="swatch" style="background:#888"></span>Offline</div>
+      <div><span class="swatch" style="background:#f4a261"></span>Traccia volo</div>
+      <div><span class="swatch" style="background:#264653"></span>Ospedale</div>
+    `;
+    return div;
+  };
+  legend.addTo(map);
+
+  // Layer ospedali (sempre visibili)
+  try {
+    const sites = await fetch('/api/sites').then(r => r.json());
+    sites.forEach(s => {
+      L.circleMarker([s.lat, s.lon], {
+        radius: 5,
+        color: '#264653',
+        fillColor: '#264653',
+        fillOpacity: 0.6,
+        weight: 1
+      }).addTo(map)
+        .bindTooltip(s.city ? `${s.name} — ${s.city}` : s.name);
+    });
+  } catch (e) { console.warn('sites failed', e); }
+
+  // Tracce ultimi voli
+  try {
+    const tracks = await fetch('/api/tracks').then(r => r.json());
+    tracks.forEach(t => {
+      if (!t.track || t.track.length < 2) return;
+      const latlngs = t.track.map(p => [p.lat, p.lon]);
+      L.polyline(latlngs, {
+        color: '#f4a261',
+        weight: 2,
+        opacity: 0.7
+      }).addTo(map)
+        .bindPopup(`
+          <div class="heli-popup">
+            <b>${t.display_name}</b><br>
+            ${t.takeoff_iso || ''}<br>
+            ${t.distance_km ? t.distance_km.toFixed(0) + ' km · ' : ''}
+            ${t.duration_s ? Math.round(t.duration_s / 60) + ' min' : ''}
+            ${t.landing_site ? '<br>→ ' + t.landing_site : ''}
+          </div>
+        `);
+    });
+  } catch (e) { console.warn('tracks failed', e); }
+
+  // Stato live + refresh
+  const liveLayer = L.layerGroup().addTo(map);
+  const now = () => Math.floor(Date.now() / 1000);
+
+  async function refreshLive() {
+    try {
+      const states = await fetch('/api/live').then(r => r.json());
+      liveLayer.clearLayers();
+      states.forEach(s => {
+        if (s.lat == null || s.lon == null) return;
+        const ageS = now() - (s.updated_ts || 0);
+        let color = '#888';        // offline
+        if (ageS < 300 && s.in_flight) color = '#d62828';
+        else if (ageS < 300 && s.on_ground) color = '#2a9d8f';
+        const marker = L.circleMarker([s.lat, s.lon], {
+          radius: 8,
+          color: color,
+          fillColor: color,
+          fillOpacity: 0.85,
+          weight: 2
+        }).addTo(liveLayer);
+        const alt = s.altitude_m != null ? `${s.altitude_m} m` : '—';
+        const vel = s.velocity_ms != null ? `${(s.velocity_ms * 1.944).toFixed(0)} kt` : '—';
+        const cs = s.callsign || '—';
+        marker.bindPopup(`
+          <div class="heli-popup">
+            <b>${s.display_name}</b><br>
+            ${s.in_flight ? 'In volo' : (s.on_ground ? 'Al suolo' : '—')}<br>
+            Callsign: ${cs}<br>
+            Quota: ${alt} · Vel: ${vel}<br>
+            Fonte: ${s.source || '—'}<br>
+            Visto ${ageS}s fa
+          </div>
+        `);
+      });
+    } catch (e) { console.warn('live refresh failed', e); }
+  }
+
+  await refreshLive();
+  setInterval(refreshLive, 30000);  // refresh ogni 30s
+})();
+</script>
+{% endblock %}

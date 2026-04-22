@@ -693,7 +693,7 @@ def _emit_landing(
     if storage is not None and h.flight_start_ts is not None:
         site = find_landing_site(*pos, sites) if pos else None
         try:
-            storage.record_flight(
+            flight_id = storage.record_flight(
                 helicopter_key=h.icao24,
                 takeoff_ts=int(h.flight_start_ts),
                 landing_ts=landing_ts,
@@ -706,6 +706,9 @@ def _emit_landing(
                 callsign=h.flight_callsign,
                 inferred=inferred,
             )
+            # Persistiamo la traccia di volo per la dashboard (Leaflet polyline)
+            if flight_id and h.flight_track:
+                storage.save_flight_track(flight_id, list(h.flight_track))
         except Exception:
             log.exception("Errore salvando il volo di %s", h.display_name)
 
@@ -738,6 +741,11 @@ def process_update(
                 h.airborne_pending_cycles = 0
                 h.flight_track = []
                 h.flight_callsign = None
+                if storage is not None:
+                    try:
+                        storage.set_in_flight(h.icao24, False)
+                    except Exception:
+                        log.exception("Errore aggiornando current_states per %s", h.icao24)
         return
 
     h.missing_cycles = 0
@@ -823,6 +831,26 @@ def process_update(
         h.flight_callsign = None
 
     h.last_on_ground = on_ground
+
+    # Persistenza dello stato live per la dashboard web. L'upsert avviene a
+    # ogni poll con dati freschi — safe anche durante write del worker grazie
+    # al WAL; la web app legge concorrente senza bloccare.
+    if storage is not None:
+        try:
+            storage.upsert_current_state(
+                helicopter_key=h.icao24,
+                lat=lat,
+                lon=lon,
+                altitude_m=alt,
+                velocity_ms=vel,
+                heading_deg=state.get("heading_deg"),
+                on_ground=on_ground,
+                in_flight=h.in_flight,
+                callsign=(state.get("callsign") or "").strip() or None,
+                source=state.get("source"),
+            )
+        except Exception:
+            log.exception("Errore aggiornando current_states per %s", h.icao24)
 
 
 # ---------------------------------------------------------------------------

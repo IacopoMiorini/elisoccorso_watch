@@ -3,3 +3,4 @@ PyYAML==6.0.2
 python-dotenv==1.0.1
 staticmap==0.5.7
 Pillow==11.0.0
+Flask==3.0.3
