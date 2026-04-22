@@ -97,11 +97,23 @@ sites:
   # ============================================================
   # Basi operative
   # ============================================================
-  - name: "Base Elifriulia (Ronchi dei Legionari)"
+  - name: "Base Elifriulia Ronchi"
     city: "Ronchi dei Legionari"
     lat: 45.8275
     lon: 13.4721
     radius_m: 800
+
+  - name: "Base Elifriulia Campoformido"
+    city: "Campoformido"
+    lat: 46.0220
+    lon: 13.1880
+    radius_m: 600
+
+  - name: "Eliporto Tolmezzo"
+    city: "Tolmezzo"
+    lat: 46.4030
+    lon: 13.0200
+    radius_m: 500
 
   - name: "Base Avincis – Pieve di Cadore"
     city: "Pieve di Cadore"
