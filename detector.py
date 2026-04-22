@@ -394,26 +394,29 @@ def format_takeoff(h: Helicopter, state: dict[str, Any]) -> str:
     alt = state.get("geo_altitude_m") or state.get("baro_altitude_m")
     vel = state.get("velocity_ms")
     cs = state.get("callsign") or "—"
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
-    parts = [
-        f"🚁 <b>DECOLLO</b> — {h.display_name}",
-        f"Ora: {now}",
-        f"Callsign: <code>{cs}</code>",
-    ]
+    headline = f"🚁 <b>{h.display_name}</b> decollato"
     if h.base:
-        parts.append(f"Base: {h.base}")
-    if lat is not None and lon is not None:
-        parts.append(f"Posizione: {lat:.4f}, {lon:.4f}")
-        parts.append(f'<a href="{maps_link(lat, lon)}">📍 Mappa</a>')
-    if alt is not None:
-        parts.append(f"Quota: {int(alt)} m")
-    if vel is not None:
-        parts.append(f"Velocità: {vel * 1.944:.0f} kt")
-    parts.append("")
-    parts.append(f'<a href="{adsbx_link(h.icao24)}">🛰 ADS-B Exchange (live)</a>')
+        headline += f" da {h.base}"
+    headline += f" — {now}"
+
+    links = [f'<a href="{adsbx_link(h.icao24)}">🛰 ADS-B</a>']
     if h.registration:
-        parts.append(f'<a href="{fr24_link(h.registration)}">✈️ Flightradar24</a>')
+        links.append(f'<a href="{fr24_link(h.registration)}">✈️ FR24 live</a>')
+
+    details: list[str] = [f"Callsign: <code>{cs}</code>"]
+    if lat is not None and lon is not None:
+        details.append(
+            f'Posizione: <a href="{maps_link(lat, lon)}">{lat:.4f}, {lon:.4f}</a>'
+        )
+    if alt is not None:
+        details.append(f"Quota: {int(alt)} m")
+    if vel is not None:
+        details.append(f"Velocità: {vel * 1.944:.0f} kt")
+
+    parts = [headline, " · ".join(links)]
+    parts.append("<blockquote expandable>" + "\n".join(details) + "</blockquote>")
     return "\n".join(parts)
 
 
