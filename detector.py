@@ -27,6 +27,7 @@ log = logging.getLogger("heli-tracker.detector")
 OPENSKY_BASE = "https://opensky-network.org/api"
 ADSBLOL_BASE = "https://api.adsb.lol/v2"
 AIRPLANESLIVE_BASE = "https://api.airplanes.live/v2"
+ADSBONE_BASE = "https://api.adsb.one/v2"
 
 # Conversioni unità adsb.lol → internal (OpenSky-compatible)
 # adsb.lol riporta altitudini in feet e velocità al suolo (gs) in knots.
@@ -288,6 +289,11 @@ class AirplanesLiveClient(ReadsbCompatClient):
         super().__init__(AIRPLANESLIVE_BASE, "airplaneslive")
 
 
+class AdsbOneClient(ReadsbCompatClient):
+    def __init__(self):
+        super().__init__(ADSBONE_BASE, "adsbone")
+
+
 class AdsbClient:
     """Wrapper con cascading fallback: OpenSky primary, adsb.lol + airplanes.live
     come fallback paralleli per gli ICAO non visti dalla primary.
@@ -304,7 +310,9 @@ class AdsbClient:
     ):
         self.primary = OpenSkyClient(opensky_user, opensky_pass)
         self.fallbacks: list[ReadsbCompatClient] = (
-            [AdsbLolClient(), AirplanesLiveClient()] if enable_fallback else []
+            [AdsbLolClient(), AirplanesLiveClient(), AdsbOneClient()]
+            if enable_fallback
+            else []
         )
         self.consecutive_opensky_failures = 0
         self.last_failure_alerted = 0  # quante failure avevamo all'ultima notifica
