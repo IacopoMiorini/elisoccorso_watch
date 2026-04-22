@@ -249,27 +249,26 @@ class Storage:
         max_altitude_m: float | None = None,
         max_velocity_ms: float | None = None,
         takeoff_position: tuple[float, float] | None = None,
-        landing_position: tuple[float, float] | None = None,
-        landing_site: str | None = None,
         callsign: str | None = None,
         inferred: bool = False,
     ) -> int:
         """Registra un volo completato. Ritorna l'id generato.
 
-        `inferred=True` se il landing è stato dedotto dalla perdita del segnale
-        ADS-B (nessun touchdown osservato)."""
+        Le colonne `landing_lat`, `landing_lon`, `landing_site` vengono lasciate
+        NULL: il tracker notifica solo i decolli e la chiusura del record è
+        silenziosa (niente lookup del sito di atterraggio).
+
+        `inferred=True` se la chiusura è dedotta dalla perdita del segnale."""
         duration = max(0, int(landing_ts - takeoff_ts))
         t_lat, t_lon = takeoff_position if takeoff_position else (None, None)
-        l_lat, l_lon = landing_position if landing_position else (None, None)
         with self._tx() as c:
             cur = c.execute(
                 """
                 INSERT INTO flights (
                     helicopter_key, takeoff_ts, landing_ts, duration_s,
                     distance_km, max_altitude_m, max_velocity_ms,
-                    takeoff_lat, takeoff_lon, landing_lat, landing_lon,
-                    landing_site, callsign, inferred
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    takeoff_lat, takeoff_lon, callsign, inferred
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     helicopter_key,
@@ -281,9 +280,6 @@ class Storage:
                     float(max_velocity_ms) if max_velocity_ms is not None else None,
                     t_lat,
                     t_lon,
-                    l_lat,
-                    l_lon,
-                    landing_site,
                     callsign,
                     1 if inferred else 0,
                 ),

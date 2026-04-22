@@ -26,7 +26,6 @@ import requests
 
 from detector import (
     Helicopter,
-    LandingSite,
     format_duration,
     haversine_km,
     simulate_flight,
@@ -335,13 +334,11 @@ class CommandHandler:
         notifier: TelegramNotifier,
         storage: Storage,
         helicopters: list[Helicopter],
-        sites: list[LandingSite],
         admin_chat_id: int | None,
     ):
         self.notifier = notifier
         self.storage = storage
         self.helicopters = helicopters
-        self.sites = sites
         self.admin_chat_id = admin_chat_id
 
     # --- dispatch ------------------------------------------------------------
@@ -507,11 +504,10 @@ class CommandHandler:
         if self.admin_chat_id is None or chat_id != self.admin_chat_id:
             self.notifier.send_direct(chat_id, "Comando riservato all'admin.")
             return
-        self.notifier.send_direct(chat_id, "Lancio simulazione decollo+atterraggio…")
+        self.notifier.send_direct(chat_id, "Lancio simulazione decollo…")
         try:
             simulate_flight(
                 self.helicopters,
-                self.sites,
                 send=lambda text: self.notifier.send_direct(chat_id, text),
             )
             self.notifier.send_direct(chat_id, "Mock completato.")
@@ -578,8 +574,6 @@ class CommandHandler:
                 details.append(format_duration(r["duration_s"]))
             if r["distance_km"]:
                 details.append(f"{r['distance_km']:.0f} km")
-            if r["landing_site"]:
-                details.append(f"→ {r['landing_site']}")
             if details:
                 bits.append("  " + " · ".join(details))
             lines.append("\n".join(bits))

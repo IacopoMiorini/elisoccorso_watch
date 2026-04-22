@@ -106,7 +106,6 @@ main { padding: 0; }
             ${t.takeoff_iso || ''}<br>
             ${t.distance_km ? t.distance_km.toFixed(0) + ' km · ' : ''}
             ${t.duration_s ? Math.round(t.duration_s / 60) + ' min' : ''}
-            ${t.landing_site ? '<br>→ ' + t.landing_site : ''}
           </div>
         `);
     });

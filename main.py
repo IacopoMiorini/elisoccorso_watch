@@ -30,7 +30,6 @@ from dotenv import load_dotenv
 from detector import (
     AdsbClient,
     load_helicopters,
-    load_landing_sites,
     process_update,
     resolve_missing_icao24,
 )
@@ -56,7 +55,6 @@ class Config:
     opensky_pass: str | None
     poll_interval: int
     helicopters_file: Path
-    landing_sites_file: Path
     db_path: Path
     log_level: str
 
@@ -78,9 +76,6 @@ class Config:
             helicopters_file=Path(
                 os.environ.get("HELICOPTERS_FILE", "helicopters.yaml")
             ),
-            landing_sites_file=Path(
-                os.environ.get("LANDING_SITES_FILE", "landing_sites.yaml")
-            ),
             db_path=Path(os.environ.get("DB_PATH", "heli_tracker.db")),
             log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         )
@@ -97,8 +92,6 @@ def main() -> int:
     helis = load_helicopters(cfg.helicopters_file)
     if not helis:
         raise SystemExit("Nessun elicottero configurato in helicopters.yaml")
-    sites = load_landing_sites(cfg.landing_sites_file)
-    log.info("Landing sites caricati: %d", len(sites))
 
     storage = Storage(cfg.db_path)
 
@@ -142,7 +135,7 @@ def main() -> int:
         ]
     )
     notifier = TelegramNotifier(tg_client, cfg.telegram_chat_id, storage)
-    handler = CommandHandler(notifier, storage, tracked, sites, cfg.admin_chat_id)
+    handler = CommandHandler(notifier, storage, tracked, cfg.admin_chat_id)
 
     stop: dict[str, bool] = {"flag": False}
 
@@ -192,7 +185,7 @@ def main() -> int:
                 )
 
         for icao, h in by_icao.items():
-            process_update(h, states.get(icao), notifier, sites, storage)
+            process_update(h, states.get(icao), notifier, storage)
 
         elapsed = time.time() - start
         sleep_for = max(1.0, cfg.poll_interval - elapsed)

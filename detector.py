@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import math
-import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -45,11 +44,6 @@ AIRBORNE_CYCLES_FOR_TAKEOFF = 2
 # (segnale perso). Con POLL_INTERVAL=45s sono ~6 minuti — abbastanza per tollerare
 # buchi di copertura in valle senza dichiarare falsi atterraggi in hover/cruise.
 OFFLINE_CYCLES_FOR_LANDED = 8
-
-# Raggio di default in metri per il match di un sito d'atterraggio se il YAML
-# non specifica `radius_m` sulla voce.
-DEFAULT_SITE_RADIUS_M = 500.0
-
 
 # ---------------------------------------------------------------------------
 # Modello dati
@@ -87,19 +81,6 @@ class Helicopter:
     @property
     def display_name(self) -> str:
         return self.nickname or self.registration or self.icao24.upper()
-
-
-@dataclass
-class LandingSite:
-    name: str
-    city: str = ""
-    lat: float = 0.0
-    lon: float = 0.0
-    radius_m: float = DEFAULT_SITE_RADIUS_M
-
-    @property
-    def label(self) -> str:
-        return f"{self.name} ({self.city})" if self.city else self.name
 
 
 class Notifier(Protocol):
@@ -375,17 +356,6 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def find_landing_site(
-    lat: float, lon: float, sites: list[LandingSite]
-) -> LandingSite | None:
-    best: tuple[float, LandingSite] | None = None
-    for s in sites:
-        dist_m = haversine_km(lat, lon, s.lat, s.lon) * 1000.0
-        if dist_m <= s.radius_m and (best is None or dist_m < best[0]):
-            best = (dist_m, s)
-    return best[1] if best else None
-
-
 def format_duration(seconds: float) -> str:
     secs = max(0, int(seconds))
     if secs < 60:
@@ -447,91 +417,6 @@ def format_takeoff(h: Helicopter, state: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def format_landing_inferred(
-    h: Helicopter,
-    sites: list[LandingSite],
-) -> str:
-    """Messaggio di 'landing inferito' quando il mezzo sparisce dall'ADS-B.
-
-    Usiamo un wording diverso da un landing confermato: in montagna un elicottero
-    può sparire dal network per parecchi minuti pur continuando a volare. Il
-    messaggio è onesto su questa incertezza e mostra l'ultimo punto noto, non
-    una posizione di atterraggio certa."""
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-    minutes_since_contact = (
-        int((time.time() - h.last_seen_ts) / 60) if h.last_seen_ts else None
-    )
-
-    parts = [f"🛬 <b>ATTERRAGGIO (segnale perso)</b> — {h.display_name}"]
-    parts.append(f"Ora: {now}")
-    if minutes_since_contact is not None:
-        parts.append(f"Ultimo contatto ADS-B: {minutes_since_contact} min fa")
-    parts.append(
-        "<i>Probabilmente atterrato, ma il mezzo è uscito dalla copertura ADS-B; "
-        "potrebbe anche essere solo un buco di segnale in valle.</i>"
-    )
-
-    if h.flight_start_ts is not None:
-        # La durata va calcolata fino all'ultimo contatto utile, non al "now"
-        end_ts = h.last_seen_ts if h.last_seen_ts else time.time()
-        duration = end_ts - h.flight_start_ts
-        parts.append(f"Durata (fino all'ultimo contatto): {format_duration(duration)}")
-    if h.flight_distance_km > 0:
-        parts.append(f"Distanza tracciata: {h.flight_distance_km:.0f} km")
-    if h.flight_max_altitude_m is not None:
-        parts.append(f"Quota max: {int(h.flight_max_altitude_m)} m")
-
-    if h.last_position is not None:
-        lat, lon = h.last_position
-        site = find_landing_site(lat, lon, sites)
-        if site is not None:
-            parts.append(f"Ultimo punto noto: <b>{site.label}</b>")
-            parts.append(f'<a href="{maps_link(site.lat, site.lon)}">📍 Mappa</a>')
-        else:
-            parts.append(f"Ultimo punto noto: {lat:.4f}, {lon:.4f}")
-            parts.append(f'<a href="{maps_link(lat, lon)}">📍 Mappa</a>')
-
-    return "\n".join(parts)
-
-
-def format_landing(
-    h: Helicopter,
-    state: dict[str, Any] | None,
-    sites: list[LandingSite],
-) -> str:
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-    parts = [f"🛬 <b>ATTERRAGGIO</b> — {h.display_name}", f"Ora: {now}"]
-
-    if h.flight_start_ts is not None:
-        duration = time.time() - h.flight_start_ts
-        parts.append(f"Durata: {format_duration(duration)}")
-    if h.flight_distance_km > 0:
-        parts.append(f"Distanza: {h.flight_distance_km:.0f} km")
-    if h.flight_max_altitude_m is not None:
-        parts.append(f"Quota max: {int(h.flight_max_altitude_m)} m")
-    if h.flight_max_velocity_ms is not None:
-        parts.append(f"Velocità max: {h.flight_max_velocity_ms * 1.944:.0f} kt")
-
-    lat: float | None = None
-    lon: float | None = None
-    if state is not None:
-        lat = state.get("latitude")
-        lon = state.get("longitude")
-    if (lat is None or lon is None) and h.last_position is not None:
-        lat, lon = h.last_position
-
-    if lat is not None and lon is not None:
-        site = find_landing_site(lat, lon, sites)
-        if site is not None:
-            parts.append(f"Sito: <b>{site.label}</b>")
-            parts.append(f'<a href="{maps_link(site.lat, site.lon)}">📍 Mappa</a>')
-        else:
-            parts.append(f"Posizione: {lat:.4f}, {lon:.4f}")
-            parts.append(f'<a href="{maps_link(lat, lon)}">📍 Mappa</a>')
-
-    return "\n".join(parts)
-
-
 # ---------------------------------------------------------------------------
 # Caricamento config YAML
 # ---------------------------------------------------------------------------
@@ -556,32 +441,6 @@ def load_helicopters(path: Path) -> list[Helicopter]:
     return helis
 
 
-def load_landing_sites(path: Path) -> list[LandingSite]:
-    if not path.exists():
-        log.warning("File landing sites non trovato (%s): lookup disabilitato.", path)
-        return []
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    raw = data.get("sites") or []
-    sites: list[LandingSite] = []
-    for entry in raw:
-        name = (entry.get("name") or "").strip()
-        if not name:
-            continue
-        try:
-            sites.append(
-                LandingSite(
-                    name=name,
-                    city=(entry.get("city") or "").strip(),
-                    lat=float(entry["lat"]),
-                    lon=float(entry["lon"]),
-                    radius_m=float(entry.get("radius_m", DEFAULT_SITE_RADIUS_M)),
-                )
-            )
-        except (KeyError, TypeError, ValueError) as e:
-            log.warning("Voce landing site scartata (%s): %s", name, e)
-    return sites
-
-
 def resolve_missing_icao24(
     helis: list[Helicopter], client: "AdsbClient | OpenSkyClient"
 ) -> None:
@@ -601,130 +460,53 @@ def resolve_missing_icao24(
 
 
 # ---------------------------------------------------------------------------
-# Rendering traccia di volo (PNG)
-# ---------------------------------------------------------------------------
-
-
-def render_track_png(
-    waypoints: list[tuple[float, float]],
-    width: int = 800,
-    height: int = 500,
-) -> Path | None:
-    """Genera un PNG temporaneo con la rotta del volo sovrapposta a OSM.
-
-    Ritorna il Path del file o None se il rendering non è possibile (pochi
-    waypoint o libreria non installata o errore di download tiles).
-    Il file è temporaneo: il chiamante deve cancellarlo dopo l'invio.
-    """
-    if len(waypoints) < 2:
-        return None
-    try:
-        from staticmap import CircleMarker, Line, StaticMap
-    except ImportError:
-        log.info("staticmap non installato: skip rendering traccia.")
-        return None
-
-    try:
-        m = StaticMap(width, height, padding_x=40, padding_y=40)
-        # staticmap vuole (lon, lat)
-        coords = [(lon, lat) for lat, lon in waypoints]
-        m.add_line(Line(coords, "#d62828", 3))
-        m.add_marker(CircleMarker(coords[0], "#2a9d8f", 12))   # verde = decollo
-        m.add_marker(CircleMarker(coords[-1], "#d62828", 12))  # rosso = atterraggio
-        img = m.render()
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        tmp.close()
-        out = Path(tmp.name)
-        img.save(out)
-        return out
-    except Exception as e:
-        log.warning("Rendering traccia fallito: %s", e)
-        return None
-
-
-# ---------------------------------------------------------------------------
 # Core: process_update
 # ---------------------------------------------------------------------------
 
 
-def _landed_position(
-    h: Helicopter, state: dict[str, Any] | None
-) -> tuple[float, float] | None:
-    if state is not None:
-        lat = state.get("latitude")
-        lon = state.get("longitude")
-        if lat is not None and lon is not None:
-            return (lat, lon)
-    return h.last_position
-
-
-def _emit_landing(
+def _close_flight(
     h: Helicopter,
-    state: dict[str, Any] | None,
-    sites: list[LandingSite],
-    notifier: Notifier,
     storage: Any | None,
     inferred: bool = False,
 ) -> None:
-    """Formatta landing message, renderizza traccia, broadcasta, registra nel DB.
+    """Chiude silenziosamente un volo nel DB. Nessuna notifica: il bot espone
+    solo eventi di decollo. La traccia è comunque utile per la dashboard web.
 
-    `inferred=True` significa che il mezzo è sparito dalla rete ADS-B per N
-    cicli: non abbiamo certezza dell'atterraggio, quindi usiamo un messaggio
-    diverso e registriamo il volo col flag corrispondente.
+    `inferred=True` se la chiusura è dedotta dalla perdita di segnale ADS-B.
     """
-    if inferred:
-        text = format_landing_inferred(h, sites)
-        pos = h.last_position
-        # Al landing inferito l'ultimo punto noto può essere a bassa quota su un
-        # punto qualsiasi del percorso — la traccia PNG ha comunque valore ma
-        # va chiaro che NON include il touchdown.
-        landing_ts = int(h.last_seen_ts) if h.last_seen_ts else int(time.time())
-    else:
-        text = format_landing(h, state, sites)
-        pos = _landed_position(h, state)
-        landing_ts = int(time.time())
-
-    png_path = render_track_png(h.flight_track) if h.flight_track else None
-    notifier.broadcast_event(
-        text=text, helicopter_key=h.icao24, position=pos, photo_path=png_path
+    if storage is None or h.flight_start_ts is None:
+        return
+    landing_ts = (
+        int(h.last_seen_ts) if inferred and h.last_seen_ts else int(time.time())
     )
-    if png_path is not None:
-        try:
-            png_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    if storage is not None and h.flight_start_ts is not None:
-        site = find_landing_site(*pos, sites) if pos else None
-        try:
-            flight_id = storage.record_flight(
-                helicopter_key=h.icao24,
-                takeoff_ts=int(h.flight_start_ts),
-                landing_ts=landing_ts,
-                distance_km=h.flight_distance_km or None,
-                max_altitude_m=h.flight_max_altitude_m,
-                max_velocity_ms=h.flight_max_velocity_ms,
-                takeoff_position=h.flight_start_position,
-                landing_position=pos,
-                landing_site=site.name if site else None,
-                callsign=h.flight_callsign,
-                inferred=inferred,
-            )
-            # Persistiamo la traccia di volo per la dashboard (Leaflet polyline)
-            if flight_id and h.flight_track:
-                storage.save_flight_track(flight_id, list(h.flight_track))
-        except Exception:
-            log.exception("Errore salvando il volo di %s", h.display_name)
+    try:
+        flight_id = storage.record_flight(
+            helicopter_key=h.icao24,
+            takeoff_ts=int(h.flight_start_ts),
+            landing_ts=landing_ts,
+            distance_km=h.flight_distance_km or None,
+            max_altitude_m=h.flight_max_altitude_m,
+            max_velocity_ms=h.flight_max_velocity_ms,
+            takeoff_position=h.flight_start_position,
+            callsign=h.flight_callsign,
+            inferred=inferred,
+        )
+        if flight_id and h.flight_track:
+            storage.save_flight_track(flight_id, list(h.flight_track))
+    except Exception:
+        log.exception("Errore salvando il volo di %s", h.display_name)
 
 
 def process_update(
     h: Helicopter,
     state: dict[str, Any] | None,
     notifier: Notifier,
-    sites: list[LandingSite],
     storage: Any | None = None,
 ) -> None:
     """Aggiorna lo stato di un elicottero e invia notifiche quando serve.
+
+    Notifica solo i decolli; l'atterraggio chiude silenziosamente il record
+    di volo nel DB (la dashboard web mantiene comunque durata e traccia).
 
     `storage`: se fornito, registra ogni volo completato in `flights`.
     """
@@ -733,12 +515,12 @@ def process_update(
             h.missing_cycles += 1
             if h.missing_cycles >= OFFLINE_CYCLES_FOR_LANDED:
                 log.info(
-                    "%s: landing INFERITO (perso %d cicli, ~%d min)",
+                    "%s: chiusura INFERITA (perso %d cicli, ~%d min)",
                     h.display_name,
                     h.missing_cycles,
                     int(h.missing_cycles * 45 / 60),
                 )
-                _emit_landing(h, None, sites, notifier, storage, inferred=True)
+                _close_flight(h, storage, inferred=True)
                 h.in_flight = False
                 h.last_on_ground = True
                 h.missing_cycles = 0
@@ -828,8 +610,8 @@ def process_update(
             h.flight_callsign = cs
 
     if on_ground and h.in_flight:
-        log.info("%s: ATTERRAGGIO rilevato", h.display_name)
-        _emit_landing(h, state, sites, notifier, storage)
+        log.info("%s: atterraggio rilevato (silent close)", h.display_name)
+        _close_flight(h, storage)
         h.in_flight = False
         h.flight_track = []
         h.flight_callsign = None
@@ -864,10 +646,9 @@ def process_update(
 
 def simulate_flight(
     helicopters: list[Helicopter],
-    sites: list[LandingSite],
     send: Callable[[str], None],
 ) -> None:
-    """Simula un decollo+atterraggio del primo elicottero della lista.
+    """Simula un decollo del primo elicottero della lista.
 
     `send` è una funzione (text) -> None che invia il messaggio formattato:
     passarla consente al chiamante di decidere la destinazione (canale,
@@ -899,26 +680,8 @@ def simulate_flight(
         "geo_altitude_m": 360.0,
     }
 
-    # Popola manualmente le statistiche come se il volo durasse 18 min.
     target.last_position = (state_flying["latitude"], state_flying["longitude"])
-    target.flight_start_ts = now - 18 * 60
+    target.flight_start_ts = now
     target.flight_start_position = target.last_position
-    target.flight_max_altitude_m = 1820.0
-    target.flight_max_velocity_ms = 68.0
-    target.flight_distance_km = 37.0
 
     send(format_takeoff(target, state_flying))
-
-    # Atterraggio esattamente su Cattinara (Trieste), deve matchare il sito.
-    state_grounded = {
-        **state_flying,
-        "on_ground": True,
-        "velocity_ms": 0.0,
-        "baro_altitude_m": 80.0,
-        "geo_altitude_m": 85.0,
-        "latitude": 45.6285,
-        "longitude": 13.7960,
-    }
-    target.last_position = (state_grounded["latitude"], state_grounded["longitude"])
-
-    send(format_landing(target, state_grounded, sites))

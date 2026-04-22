@@ -14,7 +14,6 @@
       <th>Durata</th>
       <th>Distanza</th>
       <th>Quota max</th>
-      <th>Atterrato</th>
       <th></th>
     </tr>
   </thead>
@@ -27,7 +26,6 @@
       <td>{% if f.duration_s %}{{ (f.duration_s // 60) }} min{% else %}—{% endif %}</td>
       <td>{% if f.distance_km %}{{ '%.0f'|format(f.distance_km) }} km{% else %}—{% endif %}</td>
       <td>{% if f.max_altitude_m %}{{ f.max_altitude_m }} m{% else %}—{% endif %}</td>
-      <td>{{ f.landing_site or '—' }}</td>
       <td>
         {% if f.inferred %}<span class="tag inferred">segnale perso</span>{% endif %}
       </td>
