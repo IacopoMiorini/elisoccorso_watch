@@ -407,7 +407,10 @@ def adsbx_link(icao24: str) -> str:
 
 
 def fr24_link(reg: str) -> str:
-    return f"https://www.flightradar24.com/data/aircraft/{reg.lower()}"
+    """Link alla mappa live di FR24 centrata sull'aircraft.
+    Il path `/<REG>` apre il globe con il mezzo highlighted se attivo (a
+    differenza di `/data/aircraft/<reg>` che porta alla pagina statica)."""
+    return f"https://www.flightradar24.com/{reg.upper()}"
 
 
 def maps_link(lat: float, lon: float) -> str:
