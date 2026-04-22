@@ -26,6 +26,7 @@ log = logging.getLogger("heli-tracker.detector")
 
 OPENSKY_BASE = "https://opensky-network.org/api"
 ADSBLOL_BASE = "https://api.adsb.lol/v2"
+AIRPLANESLIVE_BASE = "https://api.airplanes.live/v2"
 
 # Conversioni unità adsb.lol → internal (OpenSky-compatible)
 # adsb.lol riporta altitudini in feet e velocità al suolo (gs) in knots.
@@ -219,15 +220,16 @@ class OpenSkyClient:
         return result
 
 
-class AdsbLolClient:
-    """Client adsb.lol (fallback gratuito no-auth).
+class ReadsbCompatClient:
+    """Client generico per API readsb-compatible (adsb.lol, airplanes.live, ...).
 
-    Documentazione: https://api.adsb.lol/docs
-    L'endpoint /v2/hex/<hex>[,<hex>...] accetta fino a ~50 hex comma-separated
-    e torna gli state vector in un JSON dal formato readsb.
+    Entrambe espongono `/v2/hex/<hex>[,<hex>...]` con lo stesso JSON schema.
+    Passa `base_url` e un tag `source` per distinguere nei log e nei record.
     """
 
-    def __init__(self):
+    def __init__(self, base_url: str, source: str):
+        self.base_url = base_url
+        self.source = source
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "heli-tracker-bot/1.0"})
 
@@ -235,7 +237,7 @@ class AdsbLolClient:
         if not icao24_list:
             return {}
         joined = ",".join(icao24_list)
-        r = self.session.get(f"{ADSBLOL_BASE}/hex/{joined}", timeout=15)
+        r = self.session.get(f"{self.base_url}/hex/{joined}", timeout=15)
         r.raise_for_status()
         data = r.json()
         aircraft = data.get("ac") or []
@@ -247,7 +249,7 @@ class AdsbLolClient:
             alt_baro = a.get("alt_baro")
             alt_geom = a.get("alt_geom")
             gs_kt = a.get("gs")
-            # adsb.lol riporta `alt_baro` come "ground" (string) quando a terra.
+            # readsb riporta `alt_baro` come "ground" (string) quando a terra.
             on_ground = isinstance(alt_baro, str) and alt_baro.lower() == "ground"
             baro_m = (
                 alt_baro * FT_TO_M if isinstance(alt_baro, (int, float)) else None
@@ -271,13 +273,24 @@ class AdsbLolClient:
                     else None
                 ),
                 "geo_altitude_m": geo_m,
-                "source": "adsblol",
+                "source": self.source,
             }
         return result
 
 
+class AdsbLolClient(ReadsbCompatClient):
+    def __init__(self):
+        super().__init__(ADSBLOL_BASE, "adsblol")
+
+
+class AirplanesLiveClient(ReadsbCompatClient):
+    def __init__(self):
+        super().__init__(AIRPLANESLIVE_BASE, "airplaneslive")
+
+
 class AdsbClient:
-    """Wrapper con fallback: prova OpenSky, poi adsb.lol per gli ICAO mancanti.
+    """Wrapper con cascading fallback: OpenSky primary, adsb.lol + airplanes.live
+    come fallback paralleli per gli ICAO non visti dalla primary.
 
     Traccia i fallimenti consecutivi della primary (OpenSky) per permettere al
     chiamante di allertare dopo N cicli falliti.
@@ -290,7 +303,9 @@ class AdsbClient:
         enable_fallback: bool = True,
     ):
         self.primary = OpenSkyClient(opensky_user, opensky_pass)
-        self.fallback = AdsbLolClient() if enable_fallback else None
+        self.fallbacks: list[ReadsbCompatClient] = (
+            [AdsbLolClient(), AirplanesLiveClient()] if enable_fallback else []
+        )
         self.consecutive_opensky_failures = 0
         self.last_failure_alerted = 0  # quante failure avevamo all'ultima notifica
 
@@ -300,7 +315,7 @@ class AdsbClient:
     def fetch_states(self, icao24_list: list[str]) -> dict[str, dict[str, Any]]:
         if self.primary.is_backing_off:
             # Non chiamiamo OpenSky finché siamo nel back-off richiesto dal
-            # server. Il fallback adsb.lol copre intanto.
+            # server. I fallback coprono intanto.
             result: dict[str, dict[str, Any]] = {}
         else:
             try:
@@ -316,23 +331,24 @@ class AdsbClient:
                 )
                 result = {}
 
-        if not self.fallback:
-            return result
-
-        missing = [i for i in icao24_list if i not in result]
-        if not missing:
-            return result
-        try:
-            fb = self.fallback.fetch_states(missing)
-            if fb:
-                log.info(
-                    "adsb.lol ha recuperato %d mezzi non visti da OpenSky: %s",
-                    len(fb),
-                    list(fb.keys()),
-                )
-            result.update(fb)
-        except requests.RequestException as e:
-            log.warning("adsb.lol fallback fallito: %s", e)
+        # Proviamo tutti i fallback in ordine per gli ICAO ancora mancanti.
+        # Ogni provider ha rete feeder diversa → unione massimizza copertura.
+        for fb in self.fallbacks:
+            missing = [i for i in icao24_list if i not in result]
+            if not missing:
+                break
+            try:
+                got = fb.fetch_states(missing)
+                if got:
+                    log.info(
+                        "%s ha recuperato %d mezzi: %s",
+                        fb.source,
+                        len(got),
+                        list(got.keys()),
+                    )
+                result.update(got)
+            except requests.RequestException as e:
+                log.warning("%s fallback fallito: %s", fb.source, e)
         return result
 
 
