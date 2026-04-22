@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -64,6 +65,10 @@ class Helicopter:
     missing_cycles: int = 0
     airborne_pending_cycles: int = 0
     in_flight: bool = False
+    # Prima posizione vista in aria durante la sequenza di takeoff-detection.
+    # Usata per matchare il sito di decollo (più vicina al liftoff reale del
+    # sample al momento della notifica, che può arrivare fino a ~90s dopo).
+    first_airborne_position: tuple[float, float] | None = None
     last_position: tuple[float, float] | None = None  # (lat, lon)
     last_heading: float | None = None
     last_altitude: float | None = None
@@ -380,12 +385,85 @@ def fr24_link(reg: str) -> str:
     return f"https://www.flightradar24.com/{clean}"
 
 
+def maps_link(lat: float, lon: float) -> str:
+    return f"https://www.google.com/maps/search/?api=1&query={lat:.5f},{lon:.5f}"
+
+
+# Cache dei siti noti per il match di decollo. Letto una volta a runtime
+# (path da env LANDING_SITES_FILE). In caso di modifica del file occorre
+# riavviare il servizio.
+_SITES_CACHE: list[dict[str, Any]] | None = None
+
+# Raggio minimo di match per il decollo. La notifica può arrivare fino a ~90s
+# dopo il liftoff; la prima posizione airborne salvata è ≤45s dopo, durante i
+# quali un elicottero in climb a ~50 kt percorre ~1 km. 1.5 km copre il caso
+# senza collisioni plausibili tra siti noti vicini.
+TAKEOFF_MIN_RADIUS_M = 1500.0
+
+
+def _load_landing_sites() -> list[dict[str, Any]]:
+    global _SITES_CACHE
+    if _SITES_CACHE is not None:
+        return _SITES_CACHE
+    path = Path(os.environ.get("LANDING_SITES_FILE", "landing_sites.yaml"))
+    if not path.exists():
+        _SITES_CACHE = []
+        return _SITES_CACHE
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        log.exception("Errore leggendo %s, procedo senza siti noti", path)
+        _SITES_CACHE = []
+        return _SITES_CACHE
+    _SITES_CACHE = [
+        {
+            "name": s.get("name", ""),
+            "lat": float(s["lat"]),
+            "lon": float(s["lon"]),
+            "radius_m": float(s.get("radius_m", 500)),
+        }
+        for s in (data.get("sites") or [])
+        if s.get("name") and s.get("lat") is not None and s.get("lon") is not None
+    ]
+    return _SITES_CACHE
+
+
+def find_takeoff_site(lat: float, lon: float) -> dict[str, Any] | None:
+    """Sito noto più vicino a (lat, lon) entro raggio effettivo.
+    Raggio effettivo = max(sito.radius_m, TAKEOFF_MIN_RADIUS_M)."""
+    best: dict[str, Any] | None = None
+    best_d = float("inf")
+    for s in _load_landing_sites():
+        d_m = haversine_km(lat, lon, s["lat"], s["lon"]) * 1000
+        if d_m <= max(s["radius_m"], TAKEOFF_MIN_RADIUS_M) and d_m < best_d:
+            best = s
+            best_d = d_m
+    return best
+
+
 def format_takeoff(h: Helicopter, state: dict[str, Any]) -> str:
     now = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
+    takeoff_pos = h.first_airborne_position
+    if takeoff_pos is None:
+        lat = state.get("latitude")
+        lon = state.get("longitude")
+        if lat is not None and lon is not None:
+            takeoff_pos = (lat, lon)
+
+    site = find_takeoff_site(*takeoff_pos) if takeoff_pos else None
+
     headline = f"🚁 <b>{h.display_name}</b> decollato"
-    if h.base:
-        headline += f" da {h.base}"
+    if takeoff_pos is not None:
+        link = maps_link(*takeoff_pos)
+        if site:
+            headline += f' da <a href="{link}">📍 {site["name"]}</a>'
+        else:
+            label = f'<a href="{link}">📍 posizione sconosciuta</a>'
+            if h.base:
+                headline += f" da {label} (fuori base {h.base})"
+            else:
+                headline += f" da {label}"
     headline += f" — {now}"
 
     parts = [headline]
@@ -504,6 +582,7 @@ def process_update(
                 h.airborne_pending_cycles = 0
                 h.flight_track = []
                 h.flight_callsign = None
+                h.first_airborne_position = None
                 if storage is not None:
                     try:
                         storage.set_in_flight(h.icao24, False)
@@ -539,6 +618,14 @@ def process_update(
     is_takeoff = False
     if not on_ground and not h.in_flight:
         h.airborne_pending_cycles += 1
+        # Salva la prima posizione airborne vista: è il punto più vicino al
+        # liftoff reale che abbiamo prima che la notifica parta.
+        if (
+            h.first_airborne_position is None
+            and lat is not None
+            and lon is not None
+        ):
+            h.first_airborne_position = (lat, lon)
         if prev_on_ground is True:
             is_takeoff = True
         elif prev_on_ground is None:
@@ -550,6 +637,7 @@ def process_update(
             is_takeoff = True
     elif on_ground:
         h.airborne_pending_cycles = 0
+        h.first_airborne_position = None
 
     if is_takeoff and not h.in_flight:
         log.info("%s: DECOLLO rilevato", h.display_name)
@@ -592,6 +680,7 @@ def process_update(
         h.in_flight = False
         h.flight_track = []
         h.flight_callsign = None
+        h.first_airborne_position = None
 
     h.last_on_ground = on_ground
 
@@ -658,6 +747,7 @@ def simulate_flight(
     }
 
     target.last_position = (state_flying["latitude"], state_flying["longitude"])
+    target.first_airborne_position = target.last_position
     target.flight_start_ts = now
     target.flight_start_position = target.last_position
 
