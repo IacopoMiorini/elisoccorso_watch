@@ -48,6 +48,12 @@ helicopters:
     base: "Campoformido (UD)"
     operator: "Elifriulia"
 
+  - icao24: "3006ba"
+    registration: I-MADE
+    nickname: "Elifriulia – I-MADE"
+    base: "Campoformido (UD)"
+    operator: "Elifriulia"
+
   # I-RASH è un H125 single-engine (non configurato HEMS). Lo lascio commentato:
   # non farà decolli di elisoccorso ma voli di servizio/training.
   # - icao24: "3006bb"
