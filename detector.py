@@ -372,10 +372,6 @@ def format_duration(seconds: float) -> str:
 # ---------------------------------------------------------------------------
 
 
-def adsbx_link(icao24: str) -> str:
-    return f"https://globe.adsbexchange.com/?icao={icao24}"
-
-
 def fr24_link(reg: str) -> str:
     """Link alla mappa live di FR24 centrata sull'aircraft.
     Formato: `/<REG_NO_DASH>`: FR24 accetta la registrazione senza trattino e
@@ -384,16 +380,7 @@ def fr24_link(reg: str) -> str:
     return f"https://www.flightradar24.com/{clean}"
 
 
-def maps_link(lat: float, lon: float) -> str:
-    return f"https://www.google.com/maps/search/?api=1&query={lat:.5f},{lon:.5f}"
-
-
 def format_takeoff(h: Helicopter, state: dict[str, Any]) -> str:
-    lat = state.get("latitude")
-    lon = state.get("longitude")
-    alt = state.get("geo_altitude_m") or state.get("baro_altitude_m")
-    vel = state.get("velocity_ms")
-    cs = state.get("callsign") or "—"
     now = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
     headline = f"🚁 <b>{h.display_name}</b> decollato"
@@ -401,22 +388,9 @@ def format_takeoff(h: Helicopter, state: dict[str, Any]) -> str:
         headline += f" da {h.base}"
     headline += f" — {now}"
 
-    links = [f'<a href="{adsbx_link(h.icao24)}">🛰 ADS-B</a>']
+    parts = [headline]
     if h.registration:
-        links.append(f'<a href="{fr24_link(h.registration)}">✈️ FR24 live</a>')
-
-    details: list[str] = [f"Callsign: <code>{cs}</code>"]
-    if lat is not None and lon is not None:
-        details.append(
-            f'Posizione: <a href="{maps_link(lat, lon)}">{lat:.4f}, {lon:.4f}</a>'
-        )
-    if alt is not None:
-        details.append(f"Quota: {int(alt)} m")
-    if vel is not None:
-        details.append(f"Velocità: {vel * 1.944:.0f} kt")
-
-    parts = [headline, " · ".join(links)]
-    parts.append("<blockquote expandable>" + "\n".join(details) + "</blockquote>")
+        parts.append(f'<a href="{fr24_link(h.registration)}">✈️ FR24 live</a>')
     return "\n".join(parts)
 
 
