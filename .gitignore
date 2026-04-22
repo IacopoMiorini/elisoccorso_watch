@@ -6,3 +6,9 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+heli_tracker.db
+heli_tracker.db-wal
+heli_tracker.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
