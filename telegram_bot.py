@@ -369,6 +369,9 @@ class CommandHandler:
         if cmd == "/zone_del":
             self.cmd_zone_del(chat_id, rest)
             return
+        if cmd == "/mock":
+            self.cmd_mock(chat_id, rest)
+            return
 
         handlers: dict[str, Callable[[int], None]] = {
             "/start": self.cmd_start,
@@ -378,7 +381,6 @@ class CommandHandler:
             "/all": self.cmd_all,
             "/none": self.cmd_none,
             "/stop": self.cmd_stop,
-            "/mock": self.cmd_mock,
             "/last": self.cmd_last,
             "/zone_list": self.cmd_zone_list,
         }
@@ -500,15 +502,27 @@ class CommandHandler:
             "Cancellato dal bot. Non riceverai più notifiche. Puoi tornare con /start.",
         )
 
-    def cmd_mock(self, chat_id: int) -> None:
+    def cmd_mock(self, chat_id: int, arg: str = "") -> None:
         if self.admin_chat_id is None or chat_id != self.admin_chat_id:
             self.notifier.send_direct(chat_id, "Comando riservato all'admin.")
             return
-        self.notifier.send_direct(chat_id, "Lancio simulazione decollo…")
+        target_channel = arg.strip().lower() == "channel"
+        if target_channel:
+            channel = self.notifier.channel_chat_id
+            if not channel:
+                self.notifier.send_direct(
+                    chat_id, "TELEGRAM_CHAT_ID non configurato: niente canale."
+                )
+                return
+            self.notifier.send_direct(chat_id, "Lancio simulazione → canale…")
+            dest: int | str = channel
+        else:
+            self.notifier.send_direct(chat_id, "Lancio simulazione decollo…")
+            dest = chat_id
         try:
             simulate_flight(
                 self.helicopters,
-                send=lambda text: self.notifier.send_direct(chat_id, text),
+                send=lambda text: self.notifier.send_direct(dest, text),
             )
             self.notifier.send_direct(chat_id, "Mock completato.")
         except Exception as e:
