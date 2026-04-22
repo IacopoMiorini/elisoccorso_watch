@@ -55,6 +55,7 @@ def _load_sites() -> list[dict]:
             "lat": float(s["lat"]),
             "lon": float(s["lon"]),
             "radius_m": float(s.get("radius_m", 500)),
+            "type": (s.get("type") or "hospital").lower(),
         }
         for s in (data.get("sites") or [])
         if s.get("name") and s.get("lat") is not None and s.get("lon") is not None

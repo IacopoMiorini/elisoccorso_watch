@@ -27,6 +27,13 @@ main { padding: 0; }
 }
 .heli-popup { font-size: 0.9rem; }
 .heli-popup b { color: #111; }
+.site-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  text-shadow: 0 0 3px rgba(0,0,0,0.6);
+}
 {% endblock %}
 
 {% block content %}
@@ -52,23 +59,32 @@ main { padding: 0; }
       <div><span class="swatch" style="background:#2a9d8f"></span>Al suolo</div>
       <div><span class="swatch" style="background:#888"></span>Offline</div>
       <div><span class="swatch" style="background:#f4a261"></span>Traccia volo</div>
-      <div><span class="swatch" style="background:#264653"></span>Ospedale</div>
+      <div>🏥 Ospedale &nbsp;&nbsp; 🚁 Base</div>
     `;
     return div;
   };
   legend.addTo(map);
 
-  // Layer ospedali (sempre visibili)
+  // Icone per tipologia sito
+  const hospitalIcon = L.divIcon({
+    html: '🏥',
+    className: 'site-icon',
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+  });
+  const baseIcon = L.divIcon({
+    html: '🚁',
+    className: 'site-icon',
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+  });
+
   try {
     const sites = await fetch('/api/sites').then(r => r.json());
     sites.forEach(s => {
-      L.circleMarker([s.lat, s.lon], {
-        radius: 5,
-        color: '#264653',
-        fillColor: '#264653',
-        fillOpacity: 0.6,
-        weight: 1
-      }).addTo(map)
+      const icon = s.type === 'base' ? baseIcon : hospitalIcon;
+      L.marker([s.lat, s.lon], { icon })
+        .addTo(map)
         .bindTooltip(s.city ? `${s.name} — ${s.city}` : s.name);
     });
   } catch (e) { console.warn('sites failed', e); }

@@ -102,18 +102,21 @@ sites:
     lat: 45.8275
     lon: 13.4721
     radius_m: 800
+    type: base
 
   - name: "Base Elifriulia Campoformido"
     city: "Campoformido (UDN / LIPD)"
     lat: 46.0328
     lon: 13.1883
     radius_m: 600
+    type: base
 
   - name: "Aviosuperficie Tolmezzo"
     city: "Tolmezzo (LIDT)"
     lat: 46.3969
     lon: 13.0161
     radius_m: 500
+    type: base
 
   - name: "Base Avincis – Pieve di Cadore"
     city: "Pieve di Cadore"
