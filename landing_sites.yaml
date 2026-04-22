@@ -104,15 +104,15 @@ sites:
     radius_m: 800
 
   - name: "Base Elifriulia Campoformido"
-    city: "Campoformido"
-    lat: 46.0220
-    lon: 13.1880
+    city: "Campoformido (UDN / LIPD)"
+    lat: 46.0328
+    lon: 13.1883
     radius_m: 600
 
-  - name: "Eliporto Tolmezzo"
-    city: "Tolmezzo"
-    lat: 46.4030
-    lon: 13.0200
+  - name: "Aviosuperficie Tolmezzo"
+    city: "Tolmezzo (LIDT)"
+    lat: 46.3969
+    lon: 13.0161
     radius_m: 500
 
   - name: "Base Avincis – Pieve di Cadore"
