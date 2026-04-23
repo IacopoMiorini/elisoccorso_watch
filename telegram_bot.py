@@ -36,6 +36,12 @@ log = logging.getLogger("heli-tracker.telegram")
 
 TELEGRAM_API = "https://api.telegram.org"
 
+# Retry su errori di rete (ConnectionReset, timeout ecc.) per gli invii.
+# Il Pi Zero su rete mobile/flaky vede reset sporadici: un retry a 1.5s copre
+# la quasi totalità dei casi transienti senza bloccare il poll-loop.
+_SEND_RETRIES = 2
+_SEND_BACKOFF_S = 1.5
+
 
 # ---------------------------------------------------------------------------
 # Low-level client
@@ -62,13 +68,23 @@ class TelegramClient:
         }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        try:
-            return self.session.post(
-                f"{self.base}/sendMessage", json=payload, timeout=15
-            )
-        except requests.RequestException as e:
-            log.warning("sendMessage %s error: %s", chat_id, e)
-            return None
+        last_exc: Exception | None = None
+        for attempt in range(_SEND_RETRIES + 1):
+            try:
+                return self.session.post(
+                    f"{self.base}/sendMessage", json=payload, timeout=15
+                )
+            except requests.RequestException as e:
+                last_exc = e
+                if attempt < _SEND_RETRIES:
+                    time.sleep(_SEND_BACKOFF_S * (attempt + 1))
+        log.warning(
+            "sendMessage %s error (after %d attempts): %s",
+            chat_id,
+            _SEND_RETRIES + 1,
+            last_exc,
+        )
+        return None
 
     def edit_message_reply_markup(
         self,
@@ -124,26 +140,40 @@ class TelegramClient:
         Telegram consente caption fino a 1024 caratteri."""
         try:
             with open(photo_path, "rb") as fp:
-                files = {"photo": (photo_path.name, fp, "image/png")}
-                data: dict[str, Any] = {
-                    "chat_id": chat_id,
-                    "parse_mode": "HTML",
-                    "disable_notification": False,
-                }
-                if caption:
-                    data["caption"] = caption[:1024]
+                photo_bytes = fp.read()
+        except OSError as e:
+            log.warning("sendPhoto cannot read %s: %s", photo_path, e)
+            return None
+
+        data: dict[str, Any] = {
+            "chat_id": chat_id,
+            "parse_mode": "HTML",
+            "disable_notification": False,
+        }
+        if caption:
+            data["caption"] = caption[:1024]
+
+        last_exc: Exception | None = None
+        for attempt in range(_SEND_RETRIES + 1):
+            files = {"photo": (photo_path.name, photo_bytes, "image/png")}
+            try:
                 return self.session.post(
                     f"{self.base}/sendPhoto",
                     data=data,
                     files=files,
                     timeout=30,
                 )
-        except requests.RequestException as e:
-            log.warning("sendPhoto %s error: %s", chat_id, e)
-            return None
-        except OSError as e:
-            log.warning("sendPhoto cannot read %s: %s", photo_path, e)
-            return None
+            except requests.RequestException as e:
+                last_exc = e
+                if attempt < _SEND_RETRIES:
+                    time.sleep(_SEND_BACKOFF_S * (attempt + 1))
+        log.warning(
+            "sendPhoto %s error (after %d attempts): %s",
+            chat_id,
+            _SEND_RETRIES + 1,
+            last_exc,
+        )
+        return None
 
     def get_updates(
         self, offset: int | None, timeout_s: int = 25
